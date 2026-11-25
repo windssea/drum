@@ -1,0 +1,380 @@
+{
+  "version": 1,
+  "bpm": 80,
+  "meter": [
+    4,
+    4
+  ],
+  "bars": 8,
+  "offsetMs": 0,
+  "notes": [
+    {
+      "step": 0,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 0,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 4,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 4,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 8,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 8,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 12,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 12,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 16,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 16,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 20,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 20,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 24,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 24,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 28,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 28,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 32,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 32,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 36,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 36,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 40,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 40,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 44,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 44,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 48,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 48,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 52,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 52,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 56,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 56,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 60,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 60,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 64,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 64,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 66,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 68,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 68,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 70,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 72,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 72,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 74,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 76,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 76,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 78,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 80,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 80,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 82,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 84,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 84,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 86,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 88,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 88,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 90,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 92,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 92,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 94,
+      "lane": "hat",
+      "velocity": 64
+    },
+    {
+      "step": 96,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 96,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 100,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 100,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 104,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 104,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 108,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 108,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 112,
+      "lane": "hat",
+      "velocity": 90
+    },
+    {
+      "step": 112,
+      "lane": "kick",
+      "velocity": 102
+    },
+    {
+      "step": 116,
+      "lane": "hat",
+      "velocity": 77
+    },
+    {
+      "step": 116,
+      "lane": "snare",
+      "velocity": 94
+    },
+    {
+      "step": 120,
+      "lane": "kick",
+      "velocity": 105
+    },
+    {
+      "step": 120,
+      "lane": "crash",
+      "velocity": 97
+    }
+  ],
+  "sections": [
+    {
+      "bar": 1,
+      "name": "主题 · 四分踩镲"
+    },
+    {
+      "bar": 5,
+      "name": "变化 · 八分踩镲"
+    },
+    {
+      "bar": 7,
+      "name": "收束 · 回到四分"
+    },
+    {
+      "bar": 8,
+      "name": "结尾 · 第三拍齐收"
+    }
+  ]
+}

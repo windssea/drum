@@ -1,323 +1,681 @@
-import { AnimatePresence, MotionConfig, motion, useReducedMotion } from 'motion/react'
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
-import { DrumStage } from './DrumStage'
-import { enableAudio, playDrum, startBacking, stopBacking } from './audio'
-import {
-  BEAT, BPM, COUNT_IN, DURATION, HIT_WINDOW, LANES, STORAGE_KEY, applyJudgment, blankScore, chart,
-  defaults, judgeHit, readBindings, type Hit, type Judgment, type Lane, type Mode, type Session,
-} from './game'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useReducedMotion } from 'motion/react'
+import { enableAudio } from './audio'
+import { kit, lanes, defaults, readBindings, STORAGE_KEY, makeRound, type Lane, type Lesson } from './game'
+import { lessons, songInfo, loadSong, demoMidiUrl } from './lessons'
+import { PadBank, ScoreGrid, SongPhrases, laneStyle, lessonLanes } from './PracticeBoard'
 import { useMidi, type MidiHit } from './useMidi'
+import { usePractice } from './usePractice'
 
-type IconName = 'midi' | 'volume' | 'muted' | 'play' | 'stop' | 'tune' | 'close' | 'keyboard' | 'arrow' | 'bolt'
-const iconPaths: Record<IconName, string> = {
-  midi: 'M9 3v5m6-5v5M8 8h8v3a4 4 0 0 1-4 4v6m-4-10v1a4 4 0 0 0 4 3',
-  volume: 'M4 10h4l4-4v12l-4-4H4zM16 9a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12',
-  muted: 'M4 10h4l4-4v12l-4-4H4zM16 10l4 4m0-4-4 4',
-  play: 'm9 5 11 7-11 7z',
-  stop: 'M6 6h12v12H6z',
-  tune: 'M3 6h18M3 12h18M3 18h18M8 3v6m8 0v6m-6 0v6',
-  close: 'm6 6 12 12M18 6 6 18',
-  keyboard: 'M3 6h18v12H3zM7 10h.01M10 10h.01m4 0h.01m3 0h.01M7 14h.01m3 0h4m3 0h.01',
-  arrow: 'm9 6 6 6-6 6',
-  bolt: 'm13 2-8 12h6l-1 8 9-12h-6z',
+const DrumStage = lazy(() => import('./DrumStage').then((m) => ({ default: m.DrumStage })))
+const Arcade = lazy(() => import('./arcade/Arcade'))
+const icons = {
+  play: 'm8 5 11 7-11 7Z',
+  stop: 'M6 6h12v12H6Z',
+  listen: 'M4 15v-3a8 8 0 0 1 16 0v3M4 13h4v7H5q-1 0-1-2Zm16 0h-4v7h3q1 0 1-2Z',
+  usb: 'M12 21V4m-3 3 3-4 3 4M12 15l-6-4V8m6 10 6-6V9',
+  volume: 'M3 10h4l5-5v14l-5-5H3ZM16 9q3 3 0 6m3-9q5 6 0 12',
+  mute: 'M3 10h4l5-5v14l-5-5H3Zm13 0 5 5m0-5-5 5',
+  right: 'm9 5 7 7-7 7',
+  left: 'm15 5-7 7 7 7',
+  layers: 'M4 6h3m3 0h10M4 12h3m3 0h10M4 18h3m3 0h10',
+  close: 'm6 6 12 12m0-12L6 18',
+  map: 'M3 6h18M3 12h18M3 18h18M8 3v6m8 0v6m-6 0v6',
+  beat: 'm3 17 5-12h8l5 14H3Zm9-4 6-8',
+  disc: 'M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0Zm-7 0a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z',
 }
-
-function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d={iconPaths[name]} /></svg>
-}
-
-const feedbackText: Record<Judgment, string> = { perfect: '精准', good: '命中', miss: '漏击', free: '击中' }
-const colors = Object.fromEntries(LANES.map(lane => [lane.id, lane.color]))
-const laneStyle = (id: Lane) => ({ '--lane': colors[id] } as CSSProperties)
-const secondsLabel = (seconds: number) => `00:${String(Math.max(0, Math.floor(seconds))).padStart(2, '0')}`
-
-function App() {
-  const reduced = Boolean(useReducedMotion())
-  const session = useRef<Session>({ round: null, impacts: {} })
-  const counter = useRef(0)
-  const [mode, setMode] = useState<Mode>('free')
-  const [phase, setPhase] = useState<'idle' | 'running' | 'finished'>('idle')
-  const [sound, setSound] = useState(true)
-  const [score, setScore] = useState(blankScore)
-  const [time, setTime] = useState(0)
-  const [lastHit, setLastHit] = useState<Hit | null>(null)
-  const [lastMidi, setLastMidi] = useState<MidiHit | null>(null)
-  const [bindings, setBindings] = useState(readBindings)
-  const [bindingLane, setBindingLane] = useState<Lane | null>(null)
-  const [mappingMessage, setMappingMessage] = useState('')
-  const [manual, setManual] = useState('')
-  const dialog = useRef<HTMLDialogElement>(null)
-
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bindings)) } catch { /* Storage can be unavailable in private browsing. */ }
-  }, [bindings])
-
-  const strikeLane = useCallback((lane: Lane, velocity: number, at: number, fromMidi = false) => {
-    const round = session.current.round
-    const result = round && !round.finished ? judgeHit(round, lane, at) : null
-    const impact: Hit = { id: ++counter.current, lane, velocity, at: performance.now(), judgment: result?.judgment ?? 'free', offset: result?.offset }
-    session.current.impacts[lane] = impact
-    setLastHit(impact)
-    if (result) setScore(current => applyJudgment(current, result.judgment))
-    if (mode === 'free') setScore(current => applyJudgment(current, 'free'))
-    if (!fromMidi) {
-      enableAudio(!sound)
-      playDrum(lane, velocity)
-    }
-  }, [mode, sound])
-
-  function assign(note: number, lane: Lane) {
-    setBindings(previous => ({ ...previous, [note]: lane }))
-    setMappingMessage(`已把 ${note} 绑定到${LANES.find(item => item.id === lane)!.name}。`)
-    setBindingLane(null)
-    setManual('')
-  }
-
-  const midi = useMidi(event => {
-    setLastMidi(event)
-    if (dialog.current?.open) {
-      if (bindingLane) assign(event.note, bindingLane)
-      return
-    }
-    const lane = bindings[event.note] ?? defaults[event.note]
-    if (lane) strikeLane(lane, event.velocity, event.at, true)
-  })
-
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if (event.repeat || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || dialog.current?.open) return
-      if (event.target instanceof HTMLElement && event.target.closest('input, select, textarea, [contenteditable]')) return
-      const lane = LANES.find(item => `Key${item.key}` === event.code)
-      if (!lane) return
-      event.preventDefault()
-      strikeLane(lane.id, 105, performance.now())
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [strikeLane])
-
-  useEffect(() => {
-    if (!lastHit) return
-    const handle = window.setTimeout(() => setLastHit(null), 720)
-    return () => window.clearTimeout(handle)
-  }, [lastHit])
-
-  useEffect(() => {
-    if (phase !== 'running') return
-    let frame = 0
-    let lastUpdate = -Infinity
-    function tick(now: number) {
-      const round = session.current.round
-      if (!round) return
-      const elapsed = now - round.startAt
-      let misses = 0
-      while (round.nextMiss < chart.length && chart[round.nextMiss].at + HIT_WINDOW + 24 < elapsed) {
-        const index = round.nextMiss++
-        if (!round.resolved.has(index)) misses++
-      }
-      if (misses) {
-        setScore(current => ({ ...current, combo: 0, misses: current.misses + misses }))
-        const lane = chart[round.nextMiss - 1].lane
-        setLastHit({ id: ++counter.current, lane, at: now, velocity: 0, judgment: 'miss' })
-      }
-      if (now - lastUpdate >= 50) {
-        setTime(elapsed)
-        lastUpdate = now
-      }
-      if (elapsed >= DURATION + HIT_WINDOW + 25) {
-        round.finished = true
-        setTime(DURATION)
-        setPhase('finished')
-        stopBacking()
-        return
-      }
-      frame = window.requestAnimationFrame(tick)
-    }
-    frame = window.requestAnimationFrame(tick)
-    return () => window.cancelAnimationFrame(frame)
-  }, [phase])
-
-  useEffect(() => stopBacking, [])
-
-  function reset(next: Mode) {
-    stopBacking()
-    session.current = { round: null, impacts: {} }
-    setMode(next)
-    setScore(blankScore)
-    setLastHit(null)
-    setTime(0)
-    setPhase('idle')
-  }
-
-  function begin() {
-    enableAudio(!sound)
-    const startAt = performance.now() + COUNT_IN
-    session.current = { round: { startAt, resolved: new Set(), nextMiss: 0, finished: false }, impacts: {} }
-    setScore(blankScore)
-    setTime(-COUNT_IN)
-    setLastHit(null)
-    setPhase('running')
-    startBacking(startAt)
-  }
-
-  function openMapping() {
-    setMappingMessage('')
-    setBindingLane(null)
-    setManual('')
-    dialog.current?.showModal()
-  }
-
-  function submitMapping(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!bindingLane || !/^\d{1,3}$/.test(manual)) return
-    const note = Number(manual)
-    if (note >= 0 && note <= 127) assign(note, bindingLane)
-  }
-
-  const running = phase === 'running'
-  const countdown = running && time < 0 ? Math.min(4, Math.ceil(-time / BEAT)) : 0
-  const progress = Math.min(1, Math.max(0, time / DURATION))
-  const accuracy = score.hits + score.misses ? Math.round(score.hits / (score.hits + score.misses) * 100) : null
-  const unbound = lastMidi && !(bindings[lastMidi.note] ?? defaults[lastMidi.note])
-
+function Icon({ name, size = 19 }: { name: keyof typeof icons; size?: number }) {
   return (
-    <MotionConfig reducedMotion="user">
-      <div className="app-shell">
-        <header className="topbar">
-          <div className="brand" aria-label="Drum Lab">
-            <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
-            <span>DRUM<span className="brand-light"> LAB</span></span>
-          </div>
-          <div className="top-actions">
-            <button className="icon-button sound-button" type="button" aria-label={sound ? '关闭声音' : '开启声音'} aria-pressed={sound} onClick={() => {
-              setSound(!sound)
-              enableAudio(sound)
-            }}><Icon name={sound ? 'volume' : 'muted'} size={19} /></button>
-            <motion.button className={`button connect ${midi.input ? 'is-connected' : ''}`} type="button" whileTap={{ scale: 0.96 }} onClick={() => { enableAudio(!sound); void midi.connect() }} disabled={midi.requesting}>
-              <Icon name="midi" size={17} />
-              <span>{midi.requesting ? '正在连接' : midi.input ? '电子鼓已连接' : '连接电子鼓'}</span>
-            </motion.button>
-          </div>
-        </header>
-
-        <main className="main-content">
-          <div className="intro">
-            <div>
-              <h1>鼓点练习场<span className="title-period">.</span></h1>
-              <p>用电子鼓、键盘或触屏一起打节奏。</p>
-            </div>
-            <div className="mode-switch" aria-label="游戏模式">
-              {([{ id: 'free', title: '自由打击' }, { id: 'challenge', title: '节奏挑战' }] as const).map(item => (
-                <button key={item.id} type="button" aria-pressed={mode === item.id} onClick={() => { if (mode !== item.id) reset(item.id) }}>
-                  {mode === item.id && <motion.span className="mode-highlight" layoutId="selected-mode" transition={{ type: 'spring', stiffness: 410, damping: 32 }} />}
-                  <span className="mode-title">{item.title}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {midi.error && <div className="midi-notice" role="alert"><Icon name="midi" />{midi.error}</div>}
-          <div className="play-layout">
-            <section className="game-board" aria-label="节奏鼓轨">
-              <div className="arena">
-                <div className="arena-grid" aria-hidden="true" />
-                <div className="arena-halo" aria-hidden="true" />
-                <DrumStage session={session} reduced={reduced} />
-                <div className="arena-toolbar">
-                  <div className="arena-status"><span className={`status-light ${running ? 'live' : ''}`} /><span>{mode === 'free' ? '自由打击' : running ? '挑战进行中' : '节奏挑战'}</span></div>
-                  {mode === 'challenge' && <span className="bpm"><span>{BPM}</span> BPM</span>}
-                </div>
-                <AnimatePresence mode="wait">
-                  {mode === 'free' && !lastHit && (
-                    <motion.div key="free-instruction" className="arena-prompt quiet" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                      <span>敲一下，开始练习</span>
-                    </motion.div>
-                  )}
-                  {mode === 'challenge' && phase !== 'running' && (
-                    <motion.div key={phase} className="arena-prompt challenge-prompt" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-                      <strong>{phase === 'finished' ? '挑战完成' : '30 秒节奏挑战'}</strong>
-                      <span>{phase === 'finished' ? `${score.hits} 次命中 · 命中率 ${accuracy ?? 0}%` : '音符到达击打线时，敲对应的鼓。'}</span>
-                      <motion.button type="button" className="button primary" onClick={begin} whileTap={{ scale: 0.95 }}><Icon name="play" size={17} />{phase === 'finished' ? '再来一次' : '开始挑战'}</motion.button>
-                    </motion.div>
-                  )}
-                  {countdown > 0 && <motion.div key={`count-${countdown}`} className="countdown" initial={{ opacity: 0, scale: 1.22 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.93 }} aria-live="polite">{countdown}</motion.div>}
-                  {countdown === 0 && lastHit && (mode === 'free' || running) && (
-                    <motion.div key={lastHit.id} className={`hit-feedback feedback-${lastHit.judgment}`} style={laneStyle(lastHit.lane)} initial={{ opacity: 0, y: 12, scale: 0.91 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.16 }}>
-                      <b>{mode === 'free' ? LANES.find(lane => lane.id === lastHit.lane)?.name : feedbackText[lastHit.judgment]}</b>
-                      <span>{lastHit.offset !== undefined ? `${lastHit.offset >= 0 ? '+' : '−'}${Math.round(Math.abs(lastHit.offset))} ms` : mode === 'free' ? `力度 ${lastHit.velocity}` : lastHit.judgment === 'free' ? '未对准音符' : ''}</span>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-                {running && <button type="button" className="icon-button stop-button" aria-label="结束当前挑战" onClick={() => reset('challenge')}><Icon name="stop" size={14} /></button>}
-                <div className="arena-foot" aria-hidden="true"><span>└</span><span>┘</span></div>
-              </div>
-              {mode === 'challenge' && (
-                <div className="timeline">
-                  <span>{secondsLabel(Math.max(0, time) / 1000)}</span>
-                  <div className="progress-track" role="progressbar" aria-label="挑战进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}><motion.div style={{ scaleX: progress }} /></div>
-                  <span>00:30</span>
-                </div>
-              )}
-              <div className="pads" aria-label="触屏鼓垫">
-                {LANES.map(lane => (
-                  <motion.button key={lane.id} type="button" className={`pad-button ${lastHit?.lane === lane.id && lastHit.judgment !== 'miss' ? 'pad-active' : ''}`} style={laneStyle(lane.id)} onPointerDown={event => {
-                    if (event.button === 0) strikeLane(lane.id, 99, event.timeStamp)
-                  }} onClick={event => {
-                    if (event.detail === 0) strikeLane(lane.id, 99, performance.now())
-                  }} whileTap={{ scale: 0.965 }} aria-label={`打击${lane.name}，键盘 ${lane.key}`}>
-                    <span className="pad-text"><span className="pad-color" aria-hidden="true" /><span><strong>{lane.name}</strong><small>{lane.label}</small></span></span>
-                    <kbd>{lane.key}</kbd>
-                  </motion.button>
-                ))}
-              </div>
-            </section>
-
-            <aside className="side-panel" aria-label="表现和设备">
-              <section className="score-card">
-                <div className="panel-title"><h2>练习表现</h2><Icon name="bolt" size={17} /></div>
-                <div className="score-feature">
-                  <div>
-                    <span className="metric-label">{mode === 'free' ? '击打次数' : '得分'}</span>
-                    <motion.strong key={`${mode}-${mode === 'free' ? score.hits : score.points}`} initial={{ opacity: 0.73, y: 3 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.13 }} data-testid="primary-score">{String(mode === 'free' ? score.hits : score.points).padStart(4, '0')}</motion.strong>
-                  </div>
-                  <div key={lastHit?.id ?? 0} className="meter" aria-hidden="true">{[6, 4, 7, 11, 6, 15, 19, 10, 15, 8, 13, 5, 9].map((height, index) => <i key={index} style={{ '--bar-height': `${height * 2}px`, '--bar-delay': `${index * 22}ms` } as CSSProperties} className={lastHit && lastHit.judgment !== 'miss' ? 'meter-moving' : ''} />)}</div>
-                </div>
-                <div className="score-meta">
-                  <div><span>当前连击</span><strong>{mode === 'free' ? '—' : score.combo}</strong></div>
-                  <div><span>命中率</span><strong>{mode === 'free' || accuracy === null ? '—' : `${accuracy}%`}</strong></div>
-                </div>
-              </section>
-
-              <section className="input-card">
-                <div className="panel-title"><h2>输入设备</h2><button className="icon-button mapping-button" aria-label="编辑鼓位映射" type="button" onClick={openMapping}><Icon name="tune" size={17} /></button></div>
-                <div className="input-status"><Icon name={midi.input ? 'midi' : 'keyboard'} size={18} /><div><strong>{midi.input?.name || (midi.input ? 'MIDI 输入' : '键盘与触屏')}</strong><span>{midi.input ? 'MIDI · 已连接' : midi.access ? '正在等待 USB MIDI 设备' : '可直接开始练习'}</span></div></div>
-                {midi.inputs.length > 1 && <select aria-label="选择 MIDI 输入" value={midi.preferred} onChange={event => midi.setPreferred(event.target.value)}>{midi.inputs.map(port => <option key={port.id} value={port.id}>{port.name || 'MIDI 输入'}</option>)}</select>}
-                <div className="midi-readout">
-                  <span>最近 MIDI</span>
-                  <output>{lastMidi ? `${lastMidi.note} / ${lastMidi.velocity}` : '—'}</output>
-                </div>
-                {unbound && <button className="unbound" type="button" onClick={openMapping}>音符 {lastMidi.note} 尚未绑定 <Icon name="arrow" size={14} /></button>}
-                <button type="button" className="mapping-link" onClick={openMapping}>鼓位映射 <Icon name="arrow" size={15} /></button>
-              </section>
-            </aside>
-          </div>
-        </main>
-      </div>
-
-      <dialog ref={dialog} className="mapping-dialog" aria-labelledby="mapping-title">
-        <header className="dialog-header"><h2 id="mapping-title">鼓位映射</h2><button className="icon-button" type="button" aria-label="关闭鼓位映射" onClick={() => dialog.current?.close()}><Icon name="close" /></button></header>
-        <p>选择鼓位，再敲对应的鼓，或手动输入 MIDI 编号。</p>
-        <div className="mapping-list">
-          {LANES.map(lane => {
-            const mapped = Object.entries({ ...defaults, ...bindings }).filter(([, target]) => target === lane.id).map(([note]) => note)
-            return <button key={lane.id} type="button" className="mapping-row" style={laneStyle(lane.id)} aria-pressed={bindingLane === lane.id} onClick={() => { setBindingLane(lane.id); setMappingMessage(''); setManual('') }}><span className="pad-color" /><strong>{lane.name}</strong><small>{mapped.join(' · ') || '未绑定'}</small><Icon name="arrow" size={15} /></button>
-          })}
-        </div>
-        {bindingLane && <form className="mapping-form" onSubmit={submitMapping}><label htmlFor="note-number">MIDI 编号</label><input id="note-number" type="number" min="0" max="127" step="1" placeholder="0–127" required value={manual} onChange={event => setManual(event.target.value)} /><button className="button primary" type="submit">绑定</button></form>}
-        <footer className="dialog-footer"><span role="status">{mappingMessage}</span><button type="button" className="quiet-button" onClick={() => { setBindings({}); setBindingLane(null); setMappingMessage('已恢复罗兰默认映射。') }}>恢复默认</button></footer>
-      </dialog>
-    </MotionConfig>
+    <svg
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d={icons[name]} />
+    </svg>
   )
 }
-
-export default App
+type Mode = 'lessons' | 'arcade' | 'song' | 'free'
+const labels = { lessons: '训练课程', arcade: '小游戏', song: '歌曲练习', free: '自由打击' }
+const judgeNames = { perfect: '精准', good: '命中', miss: '漏击', extra: '多击', free: '击中' }
+function CourseList({ index, choose }: { index: number; choose: (n: number) => void }) {
+  return (
+    <div className="course-list">
+      {lessons.map((l, i) => (
+        <button
+          key={l.id}
+          type="button"
+          aria-current={index === i ? 'step' : undefined}
+          onClick={() => choose(i)}
+        >
+          <span className="course-index">{String(i + 1).padStart(2, '0')}</span>
+          <span className="course-name">
+            <b>{l.name}</b>
+            <small>
+              {l.category} · {l.bpm} BPM
+            </small>
+          </span>
+          <Icon name="right" size={15} />
+        </button>
+      ))}
+    </div>
+  )
+}
+export default function App() {
+  const [mode, setMode] = useState<Mode>(() => (location.hash === '#arcade' ? 'arcade' : 'lessons')),
+    [index, setIndex] = useState(0)
+  const [sound, setSound] = useState(true),
+    [speed, setSpeed] = useState(1),
+    [view, setView] = useState<'grid' | 'stage'>('grid')
+  const [preview, setPreview] = useState(0),
+    [extended, setExtended] = useState(false)
+  const [song, setSong] = useState<Lesson | null>(null),
+    [songError, setSongError] = useState(false),
+    [retry, setRetry] = useState(0)
+  const [bindings, setBindings] = useState(readBindings),
+    [learning, setLearning] = useState<Lane | null>(null)
+  const [manual, setManual] = useState(''),
+    [message, setMessage] = useState(''),
+    [lastMidi, setMidi] = useState<MidiHit | null>(null)
+  const mapping = useRef<HTMLDialogElement>(null),
+    library = useRef<HTMLDialogElement>(null)
+  const reduced = Boolean(useReducedMotion())
+  const p = usePractice(sound, mode === 'free')
+  const { score, lastHit, phase, time, session, reset, strike } = p
+  const running = phase === 'running',
+    busy = running || phase === 'loading'
+  const lesson = mode === 'song' ? song : lessons[index],
+    info = mode === 'song' ? (song ?? songInfo) : lessons[index]
+  const bpm = Math.round(info.bpm * (mode === 'song' ? 1 : speed))
+  const ids = useMemo(() => (lesson ? lessonLanes(lesson) : []), [lesson])
+  const stageChart = useMemo(() => (lesson ? makeRound(lesson, bpm, 0, false).targets : []), [lesson, bpm])
+  const round = session.current.round
+  const bar =
+    running || phase === 'finished'
+      ? Math.min(info.bars - 1, Math.max(0, Math.floor(time / (240000 / bpm))))
+      : preview
+  const count = running && time < 0 ? Math.min(4, Math.ceil(-time / (60000 / bpm))) : 0
+  const total = score.hits + score.misses + score.extra,
+    accuracy = total ? Math.round((score.hits / total) * 100) : 0
+  const activeBar = lesson?.sections?.filter((s) => s.bar <= bar + 1).at(-1)
+  const hitLabel = lastHit && kit[lastHit.lane].name
+  const freeIds = extended ? lanes.slice(12) : lanes.slice(0, 12)
+  useEffect(() => {
+    if (mode !== 'song' || song) return
+    const controller = new AbortController()
+    setSongError(false)
+    loadSong(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted) setSong(data)
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setSongError(true)
+      })
+    return () => controller.abort()
+  }, [mode, song, retry])
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(bindings))
+    } catch {
+      /* Storage is optional. */
+    }
+  }, [bindings])
+  function assign(note: number, id: Lane) {
+    setBindings((old) => ({ ...old, [note]: id }))
+    setLearning(null)
+    setManual('')
+    setMessage('音符 ' + note + ' 已绑定到' + kit[id].name)
+  }
+  const midi = useMidi((e) => {
+    setMidi(e)
+    if (mapping.current?.open) {
+      if (learning) assign(e.note, learning)
+      return
+    }
+    if (library.current?.open) return
+    const id = bindings[e.note] ?? defaults[e.note]
+    if (id) strike(id, e.velocity, e.at, true)
+  })
+  useEffect(() => {
+    function key(e: KeyboardEvent) {
+      if (
+        e.repeat ||
+        e.altKey ||
+        e.metaKey ||
+        e.ctrlKey ||
+        mapping.current?.open ||
+        library.current?.open ||
+        (e.target instanceof HTMLElement && e.target.closest('input,select,textarea,[contenteditable]'))
+      )
+        return
+      const id = lanes.find((l) => kit[l].key && e.code === 'Key' + kit[l].key)
+      if (id) {
+        e.preventDefault()
+        strike(id, mode === 'arcade' ? (e.shiftKey ? 121 : 78) : 102, e.timeStamp)
+      }
+    }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [strike, mode])
+  function changeMode(next: Mode) {
+    if (next !== mode) {
+      reset()
+      setMode(next)
+      setPreview(0)
+      if (location.hash === '#arcade' || next === 'arcade') {
+        history.replaceState(
+          null,
+          '',
+          location.pathname + location.search + (next === 'arcade' ? '#arcade' : ''),
+        )
+      }
+    }
+  }
+  function choose(n: number) {
+    reset()
+    setMode('lessons')
+    setIndex(n)
+    setPreview(0)
+    setSpeed(1)
+    library.current?.close()
+  }
+  function openMap() {
+    if (busy) reset()
+    setLearning(null)
+    setMessage('')
+    setManual('')
+    mapping.current?.showModal()
+  }
+  function submit(e: FormEvent) {
+    e.preventDefault()
+    if (learning && /^\d{1,3}$/.test(manual) && Number(manual) <= 127) assign(Number(manual), learning)
+  }
+  function begin(demo: boolean) {
+    if (lesson) {
+      setPreview(0)
+      window.scrollTo(0, 0)
+      void p.begin(lesson, bpm, demo)
+    }
+  }
+  function connect() {
+    void enableAudio(!sound).catch(() => {})
+    void midi.connect()
+  }
+  const feedback = lastHit
+    ? mode === 'free'
+      ? hitLabel + ' · 力度 ' + lastHit.velocity
+      : lastHit.judgment === 'free'
+        ? hitLabel
+        : judgeNames[lastHit.judgment] +
+          ' · ' +
+          hitLabel +
+          (lastHit.offset === undefined
+            ? ''
+            : ' · ' + (lastHit.offset < 0 ? '提前 ' : '延后 ') + Math.round(Math.abs(lastHit.offset)) + ' ms')
+    : ''
+  return (
+    <div className={busy ? 'shell is-playing' : 'shell'}>
+      <header className="mast">
+        <div className="mast-inner">
+          <div className="brand">
+            <span className="brand-sign" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            DRUM<span>LAB</span>
+          </div>
+          <nav aria-label="练习模式">
+            {(Object.keys(labels) as Mode[]).map((m) => (
+              <button key={m} aria-pressed={mode === m} onClick={() => changeMode(m)}>
+                {labels[m]}
+              </button>
+            ))}
+          </nav>
+          <div className="device-actions">
+            <button
+              className="iconbtn"
+              aria-label={sound ? '关闭声音' : '开启声音'}
+              aria-pressed={sound}
+              onClick={() => {
+                setSound(!sound)
+                void enableAudio(sound).catch(() => {})
+              }}
+            >
+              <Icon name={sound ? 'volume' : 'mute'} />
+            </button>
+            <button className="connect" disabled={midi.requesting} onClick={connect}>
+              <Icon name="usb" />
+              {midi.requesting ? '正在连接' : midi.input ? '已连接电子鼓' : '连接电子鼓'}
+            </button>
+          </div>
+        </div>
+      </header>
+      <main className="workspace">
+        {midi.error && (
+          <p role="alert" className="notice">
+            {midi.error}
+          </p>
+        )}
+        {mode === 'arcade' ? (
+          <Suspense fallback={<p role="status">正在打开小游戏…</p>}>
+            <Arcade practice={p} reduced={reduced} onMap={openMap} />
+          </Suspense>
+        ) : (
+          <div className="layout">
+            <aside className="sidebar" aria-label={mode === 'song' ? '歌曲资料' : '课程导航'}>
+              {mode === 'song' ? (
+                <>
+                  <div className="side-heading">
+                    <Icon name="disc" />
+                    <h2>歌曲资料</h2>
+                  </div>
+                  <div className="record">
+                    <div className="vinyl" aria-hidden="true">
+                      <i />
+                    </div>
+                    <h3>两只老虎</h3>
+                    <p>Frère Jacques</p>
+                  </div>
+                  {song && (
+                    <>
+                      <h3 className="side-label">段落与鼓点</h3>
+                      <SongPhrases lesson={song} />
+                      <a className="download" href={demoMidiUrl} download>
+                        下载编曲 MIDI ↗
+                      </a>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="side-heading">
+                    <Icon name="layers" />
+                    <h2>课程目录</h2>
+                    <small>08</small>
+                  </div>
+                  <CourseList index={mode === 'lessons' ? index : -1} choose={choose} />
+                </>
+              )}
+              <button className="map-link" onClick={openMap}>
+                <Icon name="map" />
+                鼓位映射
+                <Icon name="right" size={15} />
+              </button>
+            </aside>
+            <article className="studio">
+              <div className="heading">
+                <div>
+                  <div className="eyebrow">
+                    <span className="live-dot" />
+                    {mode === 'lessons'
+                      ? '课程 ' + String(index + 1).padStart(2, '0') + ' / 08 · ' + info.category
+                      : mode === 'song'
+                        ? '歌曲练习 · 传统旋律'
+                        : '电子鼓 · 自由打击'}
+                  </div>
+                  <h1>{mode === 'free' ? '自由打击' : info.name}</h1>
+                </div>
+                {mode !== 'free' ? (
+                  <div className="tempo">
+                    <Icon name="beat" size={25} />
+                    <strong>{bpm}</strong>
+                    <small>BPM</small>
+                  </div>
+                ) : (
+                  <div className="tempo">
+                    <strong>{score.hits}</strong>
+                    <small>次击打</small>
+                  </div>
+                )}
+              </div>
+              <p className="guide">
+                {mode === 'free' ? '敲击电子鼓或触摸鼓垫，可查看鼓位和力度。' : info.guide}
+              </p>
+              <div className="compact-tools">
+                {mode === 'lessons' && (
+                  <button onClick={() => library.current?.showModal()}>
+                    <Icon name="layers" />
+                    选课
+                  </button>
+                )}
+                <button onClick={openMap}>
+                  <Icon name="map" />
+                  鼓位映射
+                </button>
+              </div>
+              {mode === 'free' ? (
+                <section className="panel free-panel">
+                  <div className="panel-top">
+                    <h2>触屏鼓组</h2>
+                    <div className="switch">
+                      <button aria-pressed={!extended} onClick={() => setExtended(false)}>
+                        常用鼓位
+                      </button>
+                      <button aria-pressed={extended} onClick={() => setExtended(true)}>
+                        边击与扩展
+                      </button>
+                    </div>
+                  </div>
+                  <PadBank ids={freeIds} hit={lastHit} strike={(l, t) => strike(l, 102, t)} />
+                  <div className="monitor">
+                    <span className="live-dot" />
+                    {feedback || '等待击打'}
+                    {lastMidi && (
+                      <small>
+                        MIDI {lastMidi.note} · 力度 {lastMidi.velocity}
+                      </small>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <>
+                  {!lesson ? (
+                    <div className="panel loading" role="status">
+                      {songError ? '歌曲谱面未能加载' : '正在读取谱面…'}
+                      {songError && <button onClick={() => setRetry((n) => n + 1)}>重新加载</button>}
+                    </div>
+                  ) : (
+                    <>
+                      <section className="panel score-panel" aria-label="训练谱面">
+                        <div className="panel-top">
+                          <div className="score-title">
+                            <h2>练习谱</h2>
+                            <span>4/4</span>
+                          </div>
+                          <div className="switch">
+                            <button aria-pressed={view === 'grid'} onClick={() => setView('grid')}>
+                              节奏格
+                            </button>
+                            <button aria-pressed={view === 'stage'} onClick={() => setView('stage')}>
+                              落点
+                            </button>
+                          </div>
+                        </div>
+                        <div className="bar-info">
+                          <div>
+                            <b>第 {bar + 1} 小节</b>
+                            <small> / {info.bars} 小节</small>
+                          </div>
+                          {busy ? (
+                            <span className="play-state" role="status">
+                              {count
+                                ? '预备 · ' + count
+                                : phase === 'loading'
+                                  ? '音频准备中'
+                                  : round?.demo
+                                    ? '示范播放中'
+                                    : '正在跟练'}
+                            </span>
+                          ) : (
+                            <div className="bar-nav">
+                              <button
+                                aria-label="上一小节"
+                                disabled={bar === 0}
+                                onClick={() => {
+                                  reset()
+                                  setPreview(bar - 1)
+                                }}
+                              >
+                                <Icon name="left" size={16} />
+                              </button>
+                              <button
+                                aria-label="下一小节"
+                                disabled={bar === info.bars - 1}
+                                onClick={() => {
+                                  reset()
+                                  setPreview(bar + 1)
+                                }}
+                              >
+                                <Icon name="right" size={16} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {view === 'grid' ? (
+                          <ScoreGrid
+                            lesson={lesson}
+                            ids={ids}
+                            bar={bar}
+                            time={time}
+                            round={round}
+                            running={running}
+                          />
+                        ) : (
+                          <div className="stage">
+                            <Suspense fallback={<span>载入鼓轨…</span>}>
+                              <DrumStage session={session} ids={ids} chart={stageChart} reduced={reduced} />
+                            </Suspense>
+                            {count > 0 && <b className="stage-count">{count}</b>}
+                          </div>
+                        )}
+                        <div className="legend">
+                          {activeBar ? (
+                            <b>{activeBar.name}</b>
+                          ) : (
+                            <span>
+                              {lesson.division === 4
+                                ? '四分音符'
+                                : lesson.division === 8
+                                  ? '八分音符'
+                                  : '十六分音符'}
+                            </span>
+                          )}
+                          <span>● 鼓面　× 镲　· 空拍</span>
+                        </div>
+                        <div className="transport">
+                          <div className="actions">
+                            {busy ? (
+                              <button className="action primary" onClick={reset}>
+                                <Icon name="stop" />
+                                停止{round?.demo ? '示范' : '练习'}
+                              </button>
+                            ) : (
+                              <>
+                                <button className="action primary" onClick={() => begin(false)}>
+                                  <Icon name="play" />
+                                  {phase === 'finished' ? '再练一次' : '开始跟练'}
+                                </button>
+                                <button className="action secondary" onClick={() => begin(true)}>
+                                  <Icon name="listen" />
+                                  听示范
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {mode === 'lessons' && (
+                            <div className="speed">
+                              <small>速度</small>
+                              {[0.75, 1].map((x) => (
+                                <button
+                                  key={x}
+                                  aria-pressed={speed === x}
+                                  disabled={busy}
+                                  onClick={() => {
+                                    reset()
+                                    setSpeed(x)
+                                  }}
+                                >
+                                  {x === 1 ? '原速' : '慢练'}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {mode === 'song' && (
+                            <span className="song-length">
+                              {Math.floor((info.bars * 240) / info.bpm / 60)}:
+                              {String(Math.round((info.bars * 240) / info.bpm) % 60).padStart(2, '0')} ·
+                              伴奏跟练
+                            </span>
+                          )}
+                        </div>
+                      </section>
+                      {p.error && (
+                        <p role="alert" className="notice">
+                          {p.error}
+                        </p>
+                      )}
+                      <section className="touch-section">
+                        <div className="touch-header">
+                          <h2>触屏鼓垫</h2>
+                          <span className={'feedback ' + (lastHit?.judgment ?? '')}>
+                            {count ? '预备 ' + count : feedback || '支持同时敲击'}
+                          </span>
+                        </div>
+                        <PadBank ids={ids} hit={lastHit} strike={(l, t) => strike(l, 102, t)} />
+                      </section>
+                      {phase === 'finished' && (
+                        <div className="result" role="status">
+                          <b>{round?.demo ? '示范结束' : '练习完成'}</b>
+                          <span>
+                            {round?.demo
+                              ? '跟着四拍预备，自己打一遍。'
+                              : score.hits +
+                                ' 次命中 · ' +
+                                score.misses +
+                                ' 次漏击 · ' +
+                                score.extra +
+                                ' 次多击'}
+                          </span>
+                          {mode === 'lessons' && !round?.demo && index < lessons.length - 1 && (
+                            <button onClick={() => choose(index + 1)}>下一课 →</button>
+                          )}
+                        </div>
+                      )}
+                      <div className="stats" aria-label="练习表现">
+                        {[
+                          ['得分', score.points],
+                          ['命中率', total ? accuracy + '%' : '—'],
+                          ['最佳连击', score.best],
+                          ['精准击打', score.perfect],
+                        ].map(([k, v]) => (
+                          <div key={k}>
+                            <span>{k}</span>
+                            <b>{v}</b>
+                          </div>
+                        ))}
+                      </div>
+                      {mode === 'song' && (
+                        <details className="mobile-song">
+                          <summary>歌曲段落与 MIDI</summary>
+                          <SongPhrases lesson={lesson} />
+                          <a href={demoMidiUrl} download>
+                            下载编曲 MIDI ↗
+                          </a>
+                        </details>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </article>
+          </div>
+        )}
+      </main>
+      <dialog ref={library} className="dialog">
+        <header>
+          <h2>课程目录</h2>
+          <button className="iconbtn" aria-label="关闭目录" onClick={() => library.current?.close()}>
+            <Icon name="close" />
+          </button>
+        </header>
+        <CourseList index={index} choose={choose} />
+      </dialog>
+      <dialog ref={mapping} className="dialog" aria-label="鼓位映射">
+        <header>
+          <h2>鼓位映射</h2>
+          <button className="iconbtn" aria-label="关闭鼓位映射" onClick={() => mapping.current?.close()}>
+            <Icon name="close" />
+          </button>
+        </header>
+        <p>默认使用 TD-17 音符表。点选鼓位，再敲实体鼓学习编号。</p>
+        <div className="device-status">
+          <b>{midi.input?.name || '触屏与键盘'}</b>
+          <button onClick={connect}>连接电子鼓</button>
+        </div>
+        {midi.error && <p role="alert">{midi.error}</p>}
+        {midi.inputs.length > 1 && (
+          <select
+            aria-label="选择 MIDI 输入"
+            value={midi.preferred}
+            onChange={(e) => midi.setPreferred(e.target.value)}
+          >
+            {midi.inputs.map((port) => (
+              <option key={port.id} value={port.id}>
+                {port.name || 'MIDI 输入'}
+              </option>
+            ))}
+          </select>
+        )}
+        <p className="midi-log">
+          最近 MIDI　
+          {lastMidi
+            ? lastMidi.note +
+              ' · 力度 ' +
+              lastMidi.velocity +
+              ' · ' +
+              (kit[(bindings[lastMidi.note] ?? defaults[lastMidi.note]) as Lane]?.name ?? '未绑定')
+            : '等待输入'}
+        </p>
+        <div className="mapping-list">
+          {lanes.map((id) => (
+            <button
+              style={laneStyle(id)}
+              className="mapping-row"
+              aria-pressed={learning === id}
+              key={id}
+              onClick={() => {
+                setLearning(id)
+                setMessage('')
+                setManual('')
+              }}
+            >
+              <b>{kit[id].name}</b>
+              <small>
+                {Object.entries({ ...defaults, ...bindings })
+                  .filter(([, v]) => v === id)
+                  .map(([key]) => key)
+                  .join(' / ') || '—'}
+              </small>
+            </button>
+          ))}
+        </div>
+        <div className="mapping-foot">
+          {learning && (
+            <form onSubmit={submit}>
+              <label htmlFor="note">{kit[learning].name} · 敲鼓或输入编号</label>
+              <input
+                id="note"
+                type="number"
+                min="0"
+                max="127"
+                required
+                value={manual}
+                onChange={(e) => setManual(e.target.value)}
+              />
+              <button>绑定</button>
+            </form>
+          )}
+          <footer>
+            <span role="status">{message}</span>
+            <button
+              onClick={() => {
+                setBindings({})
+                setLearning(null)
+                setMessage('已恢复 TD-17 映射')
+              }}
+            >
+              恢复默认
+            </button>
+          </footer>
+        </div>
+      </dialog>
+    </div>
+  )
+}

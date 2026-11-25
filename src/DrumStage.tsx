@@ -1,12 +1,13 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Component, memo, useLayoutEffect, useMemo, useRef, type ReactNode, type RefObject } from 'react'
 import * as THREE from 'three'
-import { APPROACH, LANES, chart, type Session } from './game'
+import { kit, type Lane, type Target, type Session } from './game'
+const APPROACH = 2120
 
 const strike = 3.1
 const depth = 29
 const spacing = 1.87
-const laneX = (index: number) => (index - 1.5) * spacing
+const laneX = (index: number, count: number) => (index - (count - 1) / 2) * spacing
 const sparkCount = 22
 
 function CameraRig() {
@@ -23,8 +24,9 @@ function CameraRig() {
   return null
 }
 
-function LaneTrack({ index, session, reduced }: { index: number; session: RefObject<Session>; reduced: boolean }) {
-  const lane = LANES[index]
+function LaneTrack({ index, ids, session, reduced }: { index: number; ids: Lane[]; session: RefObject<Session>; reduced: boolean }) {
+  const id = ids[index]
+  const lane = kit[id]
   const pad = useRef<THREE.Group>(null)
   const light = useRef<THREE.MeshBasicMaterial>(null)
   const echo = useRef<THREE.Mesh>(null)
@@ -32,10 +34,10 @@ function LaneTrack({ index, session, reduced }: { index: number; session: RefObj
   const sparks = useRef<THREE.Points>(null)
   const sparkMaterial = useRef<THREE.PointsMaterial>(null)
   const positions = useMemo(() => new Float32Array(sparkCount * 3), [])
-  const x = laneX(index)
+  const x = laneX(index, ids.length)
 
   useFrame(() => {
-    const hit = session.current.impacts[lane.id]
+    const hit = session.current.impacts[id]
     const age = hit ? Math.max(0, performance.now() - hit.at) : Infinity
     const intensity = hit ? 0.45 + (hit.velocity / 127) * 0.55 : 0
     const decay = Math.max(0, 1 - age / 460)
@@ -108,9 +110,9 @@ function LaneTrack({ index, session, reduced }: { index: number; session: RefObj
   )
 }
 
-const noteLane = chart.map(note => LANES.findIndex(lane => lane.id === note.lane))
+type StageProps = { session: RefObject<Session>; reduced: boolean; ids: Lane[]; chart: Target[] }
 
-function Notes({ session }: { session: RefObject<Session> }) {
+function Notes({ session, ids, chart }: Pick<StageProps, 'session' | 'ids' | 'chart'>) {
   const meshes = useRef<(THREE.Group | null)[]>([])
   useFrame(() => {
     const round = session.current.round
@@ -125,10 +127,10 @@ function Notes({ session }: { session: RefObject<Session> }) {
   })
 
   return <>{chart.map((note, index) => (
-    <group key={`${note.at}-${note.lane}`} ref={mesh => { meshes.current[index] = mesh }} visible={false} position-x={laneX(noteLane[index])}>
+    <group key={`${note.at}-${note.lane}`} ref={mesh => { meshes.current[index] = mesh }} visible={false} position-x={laneX(ids.indexOf(note.lane), ids.length)}>
       <mesh position-y={0.35}>
         <boxGeometry args={[1.42, 0.15, 0.46]} />
-        <meshBasicMaterial color={LANES[noteLane[index]].color} toneMapped={false} />
+        <meshBasicMaterial color={kit[note.lane].color} toneMapped={false} />
       </mesh>
       <mesh position={[0, 0.435, 0]} rotation-x={-Math.PI / 2}>
         <planeGeometry args={[1.27, 0.15]} />
@@ -187,7 +189,7 @@ function Horizon({ session, reduced }: { session: RefObject<Session>; reduced: b
   )
 }
 
-function FlatStage({ session, reduced }: { session: RefObject<Session>; reduced: boolean }) {
+function FlatStage({ session, reduced, ids, chart }: StageProps) {
   const canvas = useRef<HTMLCanvasElement>(null)
   useLayoutEffect(() => {
     const node = canvas.current!
@@ -204,30 +206,31 @@ function FlatStage({ session, reduced }: { session: RefObject<Session>; reduced:
       const ctx = context!
       ctx.clearRect(0, 0, width, height)
       const hitLine = height * 0.87
-      LANES.forEach((lane, index) => {
-        const x = width * (0.1 + 0.2 * index)
-        const active = session.current.impacts[lane.id]
+      ids.forEach((id, index) => {
+        const lane = kit[id]
+        const x = width * (0.1 + 0.8 / ids.length * index)
+        const active = session.current.impacts[id]
         const flash = active ? Math.max(0, 1 - (now - active.at) / (reduced ? 200 : 450)) : 0
         ctx.fillStyle = lane.color
         ctx.globalAlpha = 0.075 + flash * 0.25
-        ctx.fillRect(x, height * 0.18, width * 0.197, hitLine - height * 0.18)
+        ctx.fillRect(x, height * 0.18, width * 0.79 / ids.length, hitLine - height * 0.18)
         ctx.globalAlpha = 0.76
-        ctx.fillRect(x + 6, hitLine, width * 0.2 - 12, 4)
+        ctx.fillRect(x + 6, hitLine, width * 0.8 / ids.length - 12, 4)
       })
       const round = session.current.round
       if (round && !round.finished) chart.forEach((note, index) => {
         const remaining = note.at - (now - round.startAt)
         if (remaining > APPROACH || remaining < -180 || round.resolved.has(index)) return
-        const lane = noteLane[index]
-        ctx.fillStyle = LANES[lane].color
+        const lane = ids.indexOf(note.lane)
+        ctx.fillStyle = kit[note.lane].color
         ctx.globalAlpha = 0.9
-        ctx.fillRect(width * (0.1 + lane * 0.2) + 7, hitLine - remaining / APPROACH * height * 0.68, width * 0.2 - 14, 9)
+        ctx.fillRect(width * (0.1 + lane * 0.8 / ids.length) + 7, hitLine - remaining / APPROACH * height * 0.68, width * 0.8 / ids.length - 14, 9)
       })
       frame = requestAnimationFrame(draw)
     }
     frame = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(frame)
-  }, [reduced, session])
+  }, [reduced, session, ids, chart])
   return <canvas ref={canvas} className="flat-stage" aria-hidden="true" />
 }
 
@@ -237,8 +240,8 @@ class StageBoundary extends Component<{ children: ReactNode; fallback: ReactNode
   render() { return this.state.failed ? this.props.fallback : this.props.children }
 }
 
-export const DrumStage = memo(function DrumStage({ session, reduced }: { session: RefObject<Session>; reduced: boolean }) {
-  const fallback = <FlatStage session={session} reduced={reduced} />
+export const DrumStage = memo(function DrumStage({ session, reduced, ids, chart }: StageProps) {
+  const fallback = <FlatStage session={session} reduced={reduced} ids={ids} chart={chart} />
   const hasWebGL = useMemo(() => {
     try {
       const probe = document.createElement('canvas').getContext('webgl2')
@@ -254,8 +257,10 @@ export const DrumStage = memo(function DrumStage({ session, reduced }: { session
         <Canvas dpr={[1, 1.55]} gl={{ alpha: true, antialias: true }}>
           <CameraRig />
           <Horizon session={session} reduced={reduced} />
-          {LANES.map((lane, index) => <LaneTrack key={lane.id} index={index} session={session} reduced={reduced} />)}
-          <Notes session={session} />
+          <group scale-x={4 / ids.length}>
+          {ids.map((id, index) => <LaneTrack key={id} ids={ids} index={index} session={session} reduced={reduced} />)}
+          <Notes session={session} ids={ids} chart={chart} />
+          </group>
         </Canvas>
       </StageBoundary> : fallback}
     </div>
