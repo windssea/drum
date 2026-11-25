@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { decodeNote } from './game'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { decodeNote, inputTimestamp } from './game'
 
 export type MidiHit = NonNullable<ReturnType<typeof decodeNote>> & { at: number }
 
@@ -10,7 +10,7 @@ export function useMidi(onHit: (hit: MidiHit) => void) {
   const [error, setError] = useState('')
   const [requesting, setRequesting] = useState(false)
   const handler = useRef(onHit)
-  useEffect(() => { handler.current = onHit }, [onHit])
+  useLayoutEffect(() => { handler.current = onHit }, [onHit])
 
   const input = inputs.find(port => port.id === preferred)
     ?? inputs.find(port => /Roland|TD-\d|USB MIDI/i.test(port.name ?? ''))
@@ -31,9 +31,7 @@ export function useMidi(onHit: (hit: MidiHit) => void) {
     function receive(event: MIDIMessageEvent) {
       const note = decodeNote(event.data)
       if (!note) return
-      const now = performance.now()
-      const at = Math.abs(event.timeStamp - now) < 5000 ? event.timeStamp : now
-      handler.current({ ...note, at })
+      handler.current({ ...note, at: inputTimestamp(event.timeStamp) })
     }
     input.addEventListener('midimessage', receive)
     void input.open().catch(() => {

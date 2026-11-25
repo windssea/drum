@@ -88,6 +88,12 @@ export function decodeNote(data: Uint8Array | null) {
   if ((status & 0xf0) !== 0x90 || velocity === 0) return null
   return { note, velocity, channel: (status & 15) + 1 }
 }
+export function inputTimestamp(stamp: number, now = performance.now(), origin = performance.timeOrigin) {
+  // Older engines report wall-clock event stamps. Preserve a queued event's original
+  // monotonic time even when a long task delays the handler.
+  const at = stamp >= origin ? stamp - origin : stamp
+  return at > 0 && at <= now + 1 ? at : now
+}
 export type ChartNote = { lane: Lane; step: number; velocity?: number; dynamics?: 'soft' | 'strong' }
 export const ACCENT_VELOCITY = 96
 export type ArcadeTrack = {

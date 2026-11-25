@@ -83,6 +83,7 @@ export default function App() {
   const [manual, setManual] = useState(''),
     [message, setMessage] = useState(''),
     [lastMidi, setMidi] = useState<MidiHit | null>(null)
+  const mostRecentMidi = useRef<MidiHit | null>(null)
   const mapping = useRef<HTMLDialogElement>(null),
     library = useRef<HTMLDialogElement>(null)
   const reduced = Boolean(useReducedMotion())
@@ -133,7 +134,8 @@ export default function App() {
     setMessage('音符 ' + note + ' 已绑定到' + kit[id].name)
   }
   const midi = useMidi((e) => {
-    setMidi(e)
+    mostRecentMidi.current = e
+    if (mode === 'free' || mapping.current?.open) setMidi(e)
     if (mapping.current?.open) {
       if (learning) assign(e.note, learning)
       return
@@ -168,6 +170,7 @@ export default function App() {
       reset()
       setMode(next)
       setPreview(0)
+      if (next === 'free') setMidi(mostRecentMidi.current)
       if (location.hash === '#arcade' || next === 'arcade') {
         history.replaceState(
           null,
@@ -187,6 +190,7 @@ export default function App() {
   }
   function openMap() {
     if (busy) reset()
+    setMidi(mostRecentMidi.current)
     setLearning(null)
     setMessage('')
     setManual('')

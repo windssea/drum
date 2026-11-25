@@ -1,12 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { judgeHit, makeRound, ACCENT_VELOCITY } from '../src/game.ts'
+import { judgeHit, makeRound, ACCENT_VELOCITY, inputTimestamp } from '../src/game.ts'
 
 function round(notes, options = {}) {
   const lesson = { bpm: 100, bars: 4, division: 16, notes,
     arcade: { style: 'rail', roots: [48], cues: [], together: false, inputOffset: 0, ...options } }
   return makeRound(lesson, 100, 5000, false)
 }
+
+test('normalization preserves queued input time and handles Unix epoch timestamps', () => {
+  const epoch = 1795620000000
+  assert.equal(inputTimestamp(198, 236, epoch), 198)
+  assert.equal(inputTimestamp(epoch + 198, 236, epoch), 198)
+  assert.equal(inputTimestamp(198, 5236, epoch), 198)
+  assert.equal(inputTimestamp(0, 236, epoch), 236)
+  assert.equal(inputTimestamp(900, 236, epoch), 236)
+})
 
 test('millisecond event timestamps determine the window and use signed calibration', () => {
   const bar = round([{ step: 0, lane: 'kick' }, { step: 1, lane: 'kick' }], { inputOffset: 45 })

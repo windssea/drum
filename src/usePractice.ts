@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { enableAudio, loadBacking, playDrum, startBacking, stopBacking } from './audio'
+import { enableAudio, loadBacking, playDrum, prepareDrums, startBacking, stopBacking } from './audio'
 import {
   applyJudgment,
   blankScore,
   judgeHit,
+  inputTimestamp,
   makeRound,
   type Hit,
   type Judgment,
@@ -58,6 +59,7 @@ export function usePractice(sound: boolean, free: boolean) {
       const round = makeRound(lesson, bpm, performance.now() + 120 + 240000 / bpm, demo)
       startBacking(round, lesson, buffer)
       session.current = { round, impacts: {} }
+      prepareDrums(new Set(lesson.notes.map((note) => note.lane)))
       setTime(performance.now() - round.startAt)
       setPhase('running')
     } catch {
@@ -70,7 +72,10 @@ export function usePractice(sound: boolean, free: boolean) {
     }
   }
   const strike = useCallback(
-    (lane: Lane, velocity: number, at: number, fromMidi = false) => {
+    (lane: Lane, velocity: number, timestamp: number, fromMidi = false) => {
+      const now = performance.now()
+      const at = inputTimestamp(timestamp, now)
+      if (!fromMidi) playDrum(lane, velocity, !sound)
       const round = session.current.round
       let judgment: Judgment = 'free'
       let offset: number | undefined
@@ -89,13 +94,9 @@ export function usePractice(sound: boolean, free: boolean) {
         mistake = result?.mistake
         setScore((s) => applyJudgment(s, judgment))
       }
-      const hit = { id: ++serial.current, lane, at: performance.now(), velocity, judgment, offset, mistake }
+      const hit = { id: ++serial.current, lane, at: now, velocity, judgment, offset, mistake }
       session.current.impacts[lane] = hit
       setHit(hit)
-      if (!fromMidi) {
-        void enableAudio(!sound).catch(() => {})
-        playDrum(lane, velocity)
-      }
     },
     [free, sound],
   )
@@ -116,7 +117,7 @@ export function usePractice(sound: boolean, free: boolean) {
         lastMiss: Lane | undefined
       while (
         round.nextMiss < round.targets.length &&
-        round.targets[round.nextMiss].at + round.window + 18 + round.inputOffset < elapsed
+        round.targets[round.nextMiss].at + round.window + 32 + round.inputOffset < elapsed
       ) {
         const i = round.nextMiss++
         if (!round.demo && !round.resolved.has(i)) {

@@ -1,10 +1,13 @@
 import { kit, type Lane, type Lesson, type Round } from './game'
 
 let context: AudioContext | undefined, master: GainNode | undefined, noise: AudioBuffer | undefined
+let masterMuted: boolean | undefined
 let backing: GainNode | undefined
 let scheduled: AudioScheduledSourceNode[] = []
 let openHatGain: GainNode | undefined
 let cached: { url: string; buffer: AudioBuffer } | undefined
+const padSamples = new Map<string, AudioBuffer>()
+const renderingSamples = new Set<string>()
 
 export function enableAudio(muted: boolean) {
   try {
@@ -13,8 +16,13 @@ export function enableAudio(muted: boolean) {
       master = context.createGain()
       master.connect(context.destination)
     }
-    master!.gain.setTargetAtTime(muted ? 0 : 0.7, context.currentTime, 0.012)
-    if (context.state === 'suspended') return context.resume()
+    if (masterMuted !== muted) {
+      const level = muted ? 0 : 0.7
+      if (masterMuted === undefined) master!.gain.value = level
+      else master!.gain.setTargetAtTime(level, context.currentTime, 0.012)
+      masterMuted = muted
+    }
+    if (context.state !== 'running' && context.state !== 'closed') return context.resume()
   } catch {
     /* Touch pads and the visual clock also work without Web Audio. */
   }
@@ -29,7 +37,7 @@ function tone(
   gain: number,
   shape: OscillatorType = 'sine',
 ) {
-  const c = context!,
+  const c = bus.context,
     source = c.createOscillator(),
     amp = c.createGain()
   source.type = shape
@@ -43,7 +51,7 @@ function tone(
   return source
 }
 function hiss(bus: AudioNode, at: number, duration: number, freq: number, gain: number) {
-  const c = context!
+  const c = bus.context
   if (!noise) {
     noise = c.createBuffer(1, c.sampleRate, c.sampleRate)
     const data = noise.getChannelData(0)
@@ -148,19 +156,70 @@ function scheduleArcade(bus: AudioNode, first: number, beat: number, lesson: Les
   }
 }
 
-export function playDrum(lane: Lane, velocity: number) {
+function sampleKey(lane: Lane) {
+  const { voice, pitch } = kit[lane]
+  return voice + ':' + pitch
+}
+
+export function prepareDrums(ids: Iterable<Lane>) {
+  if (!context || typeof OfflineAudioContext === 'undefined') return
+  const rate = context.sampleRate
+  for (const lane of ids) {
+    const key = sampleKey(lane)
+    if (padSamples.has(key) || renderingSamples.has(key)) continue
+    try {
+      const offline = new OfflineAudioContext(1, Math.ceil(rate * 0.86), rate)
+      drum(offline.destination, 0, lane, 127)
+      renderingSamples.add(key)
+      void offline
+        .startRendering()
+        .then((buffer) => padSamples.set(key, buffer))
+        .catch(() => {
+          /* The live synthesizer is available if rendering fails. */
+        })
+        .finally(() => renderingSamples.delete(key))
+    } catch {
+      renderingSamples.delete(key)
+    }
+  }
+}
+
+export function playDrum(lane: Lane, velocity: number, muted: boolean) {
+  if (muted) return
+  if (!context || context.state !== 'running' || masterMuted) void enableAudio(false).catch(() => {})
   if (!context || !master) return
-  const at = context.currentTime + 0.003,
-    voice = kit[lane].voice
+  const at = context.currentTime
+  const voice = kit[lane].voice
   if (['hat', 'open', 'pedal'].includes(voice) && openHatGain) {
     openHatGain.gain.setTargetAtTime(0, at, 0.008)
     openHatGain = undefined
   }
-  if (voice === 'open') {
-    openHatGain = context.createGain()
-    openHatGain.connect(master)
-    drum(openHatGain, at, lane, velocity)
-  } else drum(master, at, lane, velocity)
+  const sample = padSamples.get(sampleKey(lane))
+  if (sample) {
+    const source = context.createBufferSource()
+    const gain = context.createGain()
+    source.buffer = sample
+    gain.gain.value = Math.max(0.05, velocity / 127)
+    source.connect(gain).connect(master)
+    if (voice === 'open') openHatGain = gain
+    source.onended = () => {
+      gain.disconnect()
+      if (openHatGain === gain) openHatGain = undefined
+    }
+    source.start()
+    return
+  }
+  if (voice !== 'open') drum(master, at, lane, velocity)
+  else {
+    const gain = context.createGain()
+    gain.connect(master)
+    openHatGain = gain
+    drum(gain, at, lane, velocity)[0].onended = () => {
+      gain.disconnect()
+      if (openHatGain === gain) openHatGain = undefined
+    }
+  }
+  setTimeout(() => prepareDrums([lane]), 0)
 }
 export async function loadBacking(url: string, signal: AbortSignal) {
   if (!context) throw Error('浏览器无法播放歌曲音频')
