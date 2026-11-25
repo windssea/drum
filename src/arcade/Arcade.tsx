@@ -300,37 +300,6 @@ export default function Arcade({
         </div>
       </header>
       {!busy && <p className="arcade-guide">{selected.guide}</p>}
-      <div className="arcade-play">
-        <div className="arcade-viewport">
-          <ArcadeStage key={selected.id} game={selected} session={session} reduced={reduced} active={live} />
-          {(count > 0 || phase === 'loading') && (
-            <strong className="arcade-count" aria-label={count ? '预备 ' + count : '准备中'}>
-              {count || '…'}
-            </strong>
-          )}
-          {live && !count && (
-            <span className="arcade-bar">
-              第 {currentBar} / {selected.bars} 小节
-            </span>
-          )}
-          <progress aria-label="游戏进度" value={progress} max={1} />
-        </div>
-        <div className="arcade-deck">
-          <div className="arcade-deck-top">
-            <b>鼓垫</b>
-            <span className={'arcade-feedback ' + (lastHit?.judgment ?? '')}>
-              {feedback || (round?.demo && live ? '听示范' : score.combo > 1 ? score.combo + ' 连击' : ' ')}
-              {feedback && lastHit?.offset !== undefined && (
-                <small>
-                  {lastHit.offset < -0.5 ? '早 ' : lastHit.offset > 0.5 ? '晚 ' : ''}
-                  {Math.round(Math.abs(lastHit.offset))} ms
-                </small>
-              )}
-            </span>
-          </div>
-          <ArcadePads game={selected} practice={practice} />
-        </div>
-      </div>
       {!busy && (
         <div className="arcade-actions">
           <button className="arcade-start" onClick={() => play(false)}>
@@ -397,6 +366,37 @@ export default function Arcade({
           )}
         </section>
       )}
+      <div className="arcade-play">
+        <div className="arcade-viewport">
+          <ArcadeStage key={selected.id} game={selected} session={session} reduced={reduced} active={live} />
+          {(count > 0 || phase === 'loading') && (
+            <strong className="arcade-count" aria-label={count ? '预备 ' + count : '准备中'}>
+              {count || '…'}
+            </strong>
+          )}
+          {live && !count && (
+            <span className="arcade-bar">
+              第 {currentBar} / {selected.bars} 小节
+            </span>
+          )}
+          <progress aria-label="游戏进度" value={progress} max={1} />
+        </div>
+        <div className="arcade-deck">
+          <div className="arcade-deck-top">
+            <b>鼓垫</b>
+            <span className={'arcade-feedback ' + (lastHit?.judgment ?? '')}>
+              {feedback || (round?.demo && live ? '听示范' : score.combo > 1 ? score.combo + ' 连击' : ' ')}
+              {feedback && lastHit?.offset !== undefined && (
+                <small>
+                  {lastHit.offset < -0.5 ? '早 ' : lastHit.offset > 0.5 ? '晚 ' : ''}
+                  {Math.round(Math.abs(lastHit.offset))} ms
+                </small>
+              )}
+            </span>
+          </div>
+          <ArcadePads game={selected} practice={practice} />
+        </div>
+      </div>
       {!busy && (
         <details className="arcade-calibration">
           <summary>输入延迟校准</summary>
