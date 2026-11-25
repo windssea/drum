@@ -976,6 +976,19 @@ kbd {
   }
 }
 @media (max-width: 900px) {
+  .mast-inner {
+    gap: 12px;
+  }
+  .mast nav {
+    gap: 6px;
+  }
+  .mast nav button {
+    padding-inline: 4px;
+    white-space: nowrap;
+  }
+  .mast .connect {
+    white-space: nowrap;
+  }
   .layout {
     display: block;
   }
@@ -1013,6 +1026,23 @@ kbd {
   }
   .touch-section {
     margin-top: 16px;
+  }
+}
+@media (min-width: 651px) and (max-width: 720px) {
+  .mast-inner {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0;
+    padding-top: 8px;
+  }
+  .mast nav {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .mast nav button {
+    min-height: 48px;
+    flex: 1;
   }
 }
 @media (pointer: coarse) {
