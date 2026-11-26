@@ -24,6 +24,8 @@ try {
     $invalid = Get-ChildItem -Path $project -Filter '*.import' -File -Recurse |
         Select-String -Pattern '^valid=false$' | Select-Object -First 1
     if ($invalid) { throw "Invalid Godot import: $($invalid.Path)" }
+    & $Godot --headless --path $project --check-only --script res://scripts/harbor.gd
+    if ($LASTEXITCODE -ne 0) { throw 'Battle scene script check failed' }
     & $Godot --headless --path $project --export-release Web (Join-Path $export 'index.html')
     if ($LASTEXITCODE -ne 0) { throw 'Godot Web export failed' }
     $fontLicense = [IO.File]::ReadAllText((Join-Path $project 'art/OFL-NotoSansSC.txt'))
@@ -32,6 +34,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $export 'index.credits.txt'), $credits)
     $htmlFile = Join-Path $export 'index.html'
     $html = [IO.File]::ReadAllText($htmlFile).Replace('<html lang="en">', '<html lang="zh-CN">')
+    $html = $html.Replace('width=device-width, user-scalable=no, initial-scale=1.0', 'width=device-width, user-scalable=no, initial-scale=1.0, viewport-fit=cover')
     $html = $html.Replace('<title>Tidebeat Harbor</title>', '<title>潮汐鼓港 · 鼓浪迎击</title>')
     $html = $html.Replace('</head>', '<link rel="license" href="index.credits.txt"><link rel="stylesheet" href="index.loading.css"></head>')
     $html = $html.Replace('<progress id="status-progress">', '<p class="launch-note" role="status">鼓浪迎击 · 正在装载战斗舞台</p><progress aria-label="游戏下载进度" id="status-progress">')
@@ -39,6 +42,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'infra/loading.css') -Destination (Join-Path $export 'index.loading.css')
     Copy-Item -LiteralPath (Join-Path $repo 'infra/splash.webp') -Destination (Join-Path $export 'index.cover.webp')
     Copy-Item -LiteralPath (Join-Path $project 'music/battle.ogg') -Destination (Join-Path $export 'index.theme.ogg')
+    Copy-Item -LiteralPath (Join-Path $repo 'art/motion/combat-highlights.mp4') -Destination (Join-Path $export 'index.battle.mp4')
     $practice = Join-Path $export 'practice/index.html'
     & node (Join-Path $PSScriptRoot 'build-practice-page.mjs') $practice
     if ($LASTEXITCODE -ne 0) { throw 'Practice guide generation failed' }

@@ -1,7 +1,5 @@
 ;(() => {
   if (window.harborBridge) return
-  const WIDTH = 1152,
-    HEIGHT = 720
   const padLanes = ['kick', 'snare', 'hat', 'tom']
   const keys = { KeyD: 'kick', KeyF: 'snare', KeyJ: 'hat', KeyK: 'tom' }
   let midiRoutes = {}
@@ -21,7 +19,6 @@
   const lastEffect = new Map()
   const nextVariant = new Map()
   let midiAccess, currentMidi, send
-  let guideLink
   let midiPending = false,
     generation = 0
 
@@ -273,61 +270,81 @@
     drums(lane, 106)
     send('hit', lane, at, 106)
   }
-  function canvasPosition(canvas, e) {
-    const rect = canvas.getBoundingClientRect()
-    const fit = Math.min(rect.width / WIDTH, rect.height / HEIGHT)
-    const x = (e.clientX - rect.left - (rect.width - WIDTH * fit) / 2) / fit
-    const y = (e.clientY - rect.top - (rect.height - HEIGHT * fit) / 2) / fit
-    return { x, y }
+  const controls = new Map()
+  let canvas, safeProbe, targets = {}
+  function displayMetrics() {
+    const box = canvas.getBoundingClientRect()
+    const safe = getComputedStyle(safeProbe)
+    return JSON.stringify([box.width, box.height, ...['paddingLeft', 'paddingTop', 'paddingRight', 'paddingBottom'].map(key => parseFloat(safe[key]) || 0), matchMedia('(prefers-reduced-motion: reduce)').matches])
   }
-  function trigger(canvas, e) {
-    if (e.button !== 0) return
-    const { x, y } = canvasPosition(canvas, e)
-    if (y >= 605 && y <= 682 && x >= 36 && x <= 1116) {
-      const index = Math.floor((x - 36) / 272)
-      if ((x - 36) % 272 >= 264 || !padLanes[index]) return
-      strike(padLanes[index], e)
-    } else if (x >= 273 && x <= 503 && y >= 367 && y <= 423) {
-      send('course')
-    } else if (y >= 40 && y <= 90 && x >= 512 && x <= 1116) {
-      if (x <= 684) send('tempo')
-      else if (x >= 700 && x <= 919) void connectMidi()
-      else if (x >= 935) send('action')
-    } else return
-    e.preventDefault()
+  function positionControls() {
+    const box = canvas.getBoundingClientRect()
+    for (const [key, node] of controls) {
+      const rect = targets[key]
+      if (!rect) continue
+      node.style.left = (box.left + rect[0] * box.width) + 'px'
+      node.style.top = (box.top + rect[1] * box.height) + 'px'
+      node.style.width = rect[2] * box.width + 'px'
+      node.style.height = rect[3] * box.height + 'px'
+    }
   }
   function bind(callback) {
     send = callback
-    const canvas = document.getElementById('canvas') || document.querySelector('canvas')
-    canvas.addEventListener('pointerdown', (e) => trigger(canvas, e))
-    // Use a real link so touch browsers and assistive technology can open the score.
-    guideLink = document.createElement('a')
-    guideLink.href = '/practice/'
-    guideLink.target = '_blank'
-    guideLink.rel = 'noopener'
-    guideLink.hidden = true
-    guideLink.setAttribute('aria-label', '查看架子鼓练习谱')
-    Object.assign(guideLink.style, { position: 'fixed', zIndex: '4', borderRadius: '8px' })
-    const positionGuide = () => {
-      const rect = canvas.getBoundingClientRect()
-      const fit = Math.min(rect.width / WIDTH, rect.height / HEIGHT)
-      Object.assign(guideLink.style, {
-        left: rect.left + (rect.width - WIDTH * fit) / 2 + 56 * fit + 'px',
-        top: rect.top + (rect.height - HEIGHT * fit) / 2 + 367 * fit + 'px',
-        width: 205 * fit + 'px',
-        height: 56 * fit + 'px',
-      })
+    canvas = document.getElementById('canvas') || document.querySelector('canvas')
+    safeProbe = document.createElement('div')
+    safeProbe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)'
+    document.body.append(safeProbe)
+    const labels = { action: '开始或结束战斗', tempo: '切换练习速度', midi: '连接电子鼓 MIDI', course: '切换训练课组', guide: '查看架子鼓练习谱', kick: '底鼓', snare: '军鼓', hat: '踩镲', tom: '通鼓' }
+    for (const [key, label] of Object.entries(labels)) {
+      const node = document.createElement(key === 'guide' ? 'a' : 'button')
+      node.className = 'harbor-target'
+      node.dataset.harborControl = key
+      node.setAttribute('aria-label', label)
+      if (key === 'guide') {
+        node.href = '/practice/'
+        node.target = '_blank'
+        node.rel = 'noopener'
+      } else {
+        node.type = 'button'
+        if (padLanes.includes(key)) {
+          const hit = e => {
+            strike(key, e)
+            node.classList.remove('struck')
+            // Restart without a synchronous style read on the input path.
+            if (node._fadeTimer) clearTimeout(node._fadeTimer)
+            node.classList.add('struck')
+            node._fadeTimer = setTimeout(() => node.classList.remove('struck'), 72)
+          }
+          node.addEventListener('pointerdown', e => {
+            if (e.button !== 0) return
+            hit(e)
+            e.preventDefault()
+          })
+          node.addEventListener('click', e => { if (e.detail === 0) hit(e) })
+        } else {
+          node.addEventListener('click', () => key === 'midi' ? connectMidi() : send(key))
+        }
+      }
+      node.addEventListener('focus', () => send('focus', node.matches(':focus-visible') ? key : ''))
+      node.addEventListener('blur', () => send('focus', ''))
+      if (key === 'guide' || key === 'course') node.hidden = true
+      controls.set(key, node)
+      document.body.append(node)
     }
-    document.body.append(guideLink)
-    positionGuide()
-    new ResizeObserver(positionGuide).observe(canvas)
-    window.addEventListener('resize', positionGuide)
+    const refresh = () => { positionControls(); send('layout') }
+    new ResizeObserver(refresh).observe(canvas)
+    window.addEventListener('resize', refresh)
+    matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', refresh)
     window.addEventListener('keydown', (e) => {
       if (e.repeat || e.altKey || e.metaKey || e.ctrlKey) return
       if (keys[e.code]) strike(keys[e.code], e)
       else if (e.code === 'KeyM') void connectMidi()
       else if (e.code === 'KeyB') send('tempo')
       else if (e.code === 'KeyL') send('course')
+      else if (e.code === 'ArrowLeft') send('navigate', -1, 0)
+      else if (e.code === 'ArrowRight') send('navigate', 1, 0)
+      else if (e.code === 'ArrowUp') send('navigate', 0, -1)
+      else if (e.code === 'ArrowDown') send('navigate', 0, 1)
       else if (e.code === 'Space') send('action')
       else return
       e.preventDefault()
@@ -341,11 +358,22 @@
   }
   window.harborBridge = {
     bind,
+    displayMetrics,
+    setLayout: (json) => {
+      targets = JSON.parse(json)
+      positionControls()
+    },
+    connectMidi,
+    focusControl: (name) => controls.get(name)?.focus({preventScroll: true}),
+    openGuide: () => { if (!controls.get('guide').hidden) controls.get('guide').click() },
+    tapPad: (lane) => controls.get(lane)?.click(),
     setClip,
     setPcm,
     configureImpacts: (json) => { impactProfile = JSON.parse(json) },
     setGuideVisible: (show) => {
-      guideLink.hidden = !show
+      controls.get('guide').hidden = !show
+      controls.get('course').hidden = !show
+      controls.get('tempo').disabled = !show
     },
     setMidiRoutes: (json) => {
       midiRoutes = JSON.parse(json)

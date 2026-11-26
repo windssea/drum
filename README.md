@@ -5,6 +5,7 @@
 - [游戏策划与首领谱面](docs/game-design.md)
 - [平板练习谱](https://drum-lab.windssea526.workers.dev/practice/) · [鼓谱源文件、手脚分工与教学出处](docs/drum-vocabulary.md)
 - [实机完整对战录像（含游戏原声）](art/motion/battle-playthrough.mp4)
+- [十秒实机剪辑 · 重锤、连射、破壳与反击](https://drum-lab.windssea526.workers.dev/index.battle.mp4)
 - [直接试听战斗原声](https://drum-lab.windssea526.workers.dev/index.theme.ogg) · [Gemini 配乐与节拍校对](docs/music-score.md)
 - [角色人声](docs/character-voices.md) · [战斗音效](docs/sound-effects.md) · [Grok 战斗动画](docs/motion-production.md)
 - [场景、角色与攻击演出设定](art/concepts/README.md)

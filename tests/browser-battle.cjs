@@ -54,7 +54,9 @@ async function main() {
     args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-swiftshader'],
   })
   try {
-    const p = await browser.newPage({ viewport: { width: 1024, height: 768 }, hasTouch: true })
+    const p = await browser.newPage({ viewport: {
+      width: Number(process.env.BATTLE_WIDTH || 1024), height: Number(process.env.BATTLE_HEIGHT || 768),
+    }, hasTouch: true })
     const errors = []
     p.on('pageerror', (e) => errors.push(e.message))
     p.on('console', (m) => {
@@ -290,16 +292,11 @@ async function main() {
         'windup',
       ],
     )
-    const box = await p.locator('canvas').boundingBox()
-    const s = Math.min(box.width / 1152, box.height / 720)
-    const tap = (x, y) =>
-      p.touchscreen.tap(
-        box.x + (box.width - 1152 * s) / 2 + x * s,
-        box.y + (box.height - 720 * s) / 2 + y * s,
-      )
+    const control = name => p.locator('[data-harbor-control="' + name + '"]')
+    const tap = name => control(name).tap()
     await p.keyboard.press('m')
     for (let i = 0; i < course; i++) {
-      if (i === 0) await tap(388, 395)
+      if (i === 0) await tap('course')
       else await p.keyboard.press('l')
     }
     const events = []
@@ -385,7 +382,7 @@ async function main() {
     await p.keyboard.press('f')
     await p.keyboard.press('j')
     await p.keyboard.press('k')
-    await tap(980, 645)
+    await tap('tom')
     assert.deepEqual(await p.evaluate(() => battleQA.hits.slice(-5)), [
       'kick',
       'snare',
@@ -394,14 +391,13 @@ async function main() {
       'tom',
     ])
     const cdp = await p.context().newCDPSession(p)
-    const contact = (x, id) => ({
-      x: box.x + (box.width - 1152 * s) / 2 + x * s,
-      y: box.y + (box.height - 720 * s) / 2 + 645 * s,
-      id,
-    })
+    const contact = async (name, id) => {
+      const box = await control(name).boundingBox()
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2, id }
+    }
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchStart',
-      touchPoints: [contact(155, 1), contact(690, 2)],
+      touchPoints: [await contact('kick', 1), await contact('hat', 2)],
     })
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
     assert.deepEqual(await p.evaluate(() => battleQA.hits.slice(-2)), ['kick', 'hat'])
@@ -415,7 +411,7 @@ async function main() {
     if (process.env.BATTLE_TEST_LATENCY === '1') {
       await p.evaluate(() => (window.measurePads = true))
       for (let i = 0; i < 20; i++) {
-        await tap(150 + (i % 4) * 272, 645)
+        await tap(['kick', 'snare', 'hat', 'tom'][i % 4])
         await p.waitForFunction((index) => window.padLatency[index]?.draw, i, { timeout: 1500 })
       }
       await p.evaluate(() => (window.measurePads = false))
@@ -435,11 +431,11 @@ async function main() {
         battleQA.impacts = []
         battleQA.buffers = []
       })
-      await tap(596, 65)
+      await tap('tempo')
       await p.evaluate(() => {
         battleQA.bpm = battleQA.bpm === 96 ? 72 : 96
       })
-      await tap(1000, 65)
+      await tap('action')
       await p.waitForFunction(() => battleQA.impacts.includes('lose'), {}, { timeout: 55000 })
       assert.equal(await p.evaluate(() => battleQA.impacts.filter((k) => k === 'hurt').length), 3)
       assert.ok(await p.evaluate(() => battleQA.buffers.some((b) => Math.abs(b[0] - 1.72) < 0.01)))
@@ -455,7 +451,7 @@ async function main() {
     for (const line of ['voice_castoff', 'voice_win'])
       assert.ok(voicesHeard.includes(line), 'Missing ' + line)
     const newPage = p.context().waitForEvent('page', { timeout: 8000 })
-    await tap(159, 395)
+    await tap('guide')
     const guide = await newPage
     await guide.waitForLoadState('domcontentloaded')
     assert.equal(new URL(guide.url()).pathname, '/practice/')
