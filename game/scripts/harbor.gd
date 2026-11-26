@@ -1,6 +1,7 @@
 extends Node2D
 
 const Orders = preload("res://scripts/combat_orders.gd")
+const Sound = preload("res://scripts/harbor_sfx.gd")
 const BEAT_MS := Orders.BEAT_MS
 const KICK := Orders.KICK
 const SNARE := Orders.SNARE
@@ -16,6 +17,7 @@ const MIDI_BUTTON := Rect2(700, 40, 219, 50)
 const SPEED_BUTTON := Rect2(512, 40, 172, 50)
 const ACTION_BUTTON := Rect2(935, 40, 181, 50)
 const GUIDE_BUTTON := Rect2(56, 367, 205, 56)
+const COURSE_BUTTON := Rect2(273, 367, 230, 56)
 const ART := Rect2(36, 108, 1080, 334)
 const STATUS := Rect2(408, 125, 318, 136)
 const GRID := Rect2(36, 452, 1080, 142)
@@ -39,6 +41,9 @@ enum Phase { IDLE, STARTING, PLAYING, DONE }
 
 var phase: Phase = Phase.IDLE
 var tempo := Orders.BPM
+var course := 0
+var lesson: Dictionary = Orders.COURSES[0]
+var divisions := 4
 var beat_ms := BEAT_MS
 var bar_ms := Orders.BAR_MS
 var now_ms := 0.0
@@ -77,9 +82,15 @@ var browser_events: JavaScriptObject
 var native_song: AudioStreamPlayer
 var native_kit: AudioStreamPlayer
 var native_stinger: AudioStreamPlayer
-var native_tracks: Dictionary[int, AudioStream] = {}
+var native_voice: AudioStreamPlayer
+var native_tracks: Dictionary[Vector2i, AudioStream] = {}
 var native_samples: Dictionary[String, AudioStreamWAV] = {}
 var native_effects: Dictionary[String, AudioStream] = {}
+var native_voices: Dictionary[String, AudioStreamWAV] = {}
+var native_effect_clocks: Dictionary[String, float] = {}
+var native_effect_variants: Dictionary[String, int] = {}
+var native_duck: Tween
+var accent_bar := -1
 var effects: Array[Dictionary] = []
 var recoil_ms := -100000.0
 var break_ms := -100000.0
@@ -87,6 +98,11 @@ var guard_ms := -100000.0
 var finished_ms := -100000.0
 var won := false
 var panel_styles: Dictionary[String, StyleBoxFlat] = {}
+var crew_call := -1
+var crew_call_ms := -100000.0
+var crew_end_ms := -100000.0
+var crew_played := 0
+var crew_pending: Array[int] = []
 
 
 func _ready() -> void:
@@ -127,8 +143,10 @@ func _process(_delta: float) -> void:
 	now_ms = _clock()
 	if phase == Phase.PLAYING:
 		_settle_at(now_ms)
+		_update_crew(now_ms)
 		queue_redraw()
 	elif phase == Phase.STARTING or now_ms - maxf(latest, finished_ms) < VICTORY_MS + 100.0:
+		_update_crew(now_ms)
 		queue_redraw()
 
 
@@ -146,6 +164,7 @@ func _input(event: InputEvent) -> void:
 			KEY_K: _native_strike(TOM)
 			KEY_M: _connect_native_midi()
 			KEY_B: _toggle_tempo()
+			KEY_L: _cycle_course()
 			KEY_SPACE: _action()
 		return
 	if event is InputEventMIDI:
@@ -168,6 +187,8 @@ func _input(event: InputEvent) -> void:
 		_action()
 	elif SPEED_BUTTON.has_point(position):
 		_toggle_tempo()
+	elif COURSE_BUTTON.has_point(position) and _guide_visible():
+		_cycle_course()
 	elif GUIDE_BUTTON.has_point(position) and _guide_visible():
 		OS.shell_open("https://drum-lab.windssea526.workers.dev/practice/")
 
@@ -181,6 +202,7 @@ func _browser_event(args: Array) -> void:
 				_strike(String(args[1]), float(args[2]))
 		"action": _action()
 		"tempo": _toggle_tempo()
+		"course": _cycle_course()
 		"round": _begin(float(args[1]))
 		"midi":
 			midi = String(args[1])
@@ -198,8 +220,10 @@ func _reset() -> void:
 	if browser:
 		browser.stop()
 	elif native_song:
+		_restore_native_mix()
 		native_song.stop()
 		native_stinger.stop()
+		native_voice.stop()
 	phase = Phase.IDLE
 	error_text = ""
 	damage = 0
@@ -216,6 +240,9 @@ func _reset() -> void:
 	coaching = ""
 	next_bar_to_settle = 0
 	latest = -100000.0
+	accent_bar = -1
+	native_effect_clocks.clear()
+	native_effect_variants.clear()
 	recoil_ms = -100000.0
 	break_ms = -100000.0
 	guard_ms = -100000.0
@@ -223,6 +250,11 @@ func _reset() -> void:
 	feedback = ""
 	feedback_color = GOLD
 	won = false
+	crew_call = -1
+	crew_call_ms = -100000.0
+	crew_end_ms = -100000.0
+	crew_played = 0
+	crew_pending.clear()
 	effects.clear()
 	for lane in Orders.LANES:
 		pad_hits[lane] = -100000.0
@@ -238,6 +270,17 @@ func _toggle_tempo() -> void:
 	queue_redraw()
 
 
+func _cycle_course() -> void:
+	if phase == Phase.PLAYING or phase == Phase.STARTING:
+		return
+	_reset()
+	course = (course + 1) % Orders.COURSES.size()
+	lesson = Orders.COURSES[course]
+	divisions = lesson.divisions
+	cue_chart = Orders.cues(course)
+	queue_redraw()
+
+
 func _action() -> void:
 	if phase == Phase.PLAYING or phase == Phase.STARTING:
 		_reset()
@@ -245,7 +288,7 @@ func _action() -> void:
 	_reset()
 	phase = Phase.STARTING
 	if browser:
-		browser.start(beat_ms, JSON.stringify(cue_chart))
+		browser.start(beat_ms, JSON.stringify(cue_chart), course)
 	elif not OS.has_feature("web"):
 		if native_song:
 			native_song.stream = _native_track(tempo)
@@ -264,10 +307,10 @@ func _begin(start_ms: float) -> void:
 	guard_orders.clear()
 	for cycle in range(4):
 		var group: Array[Orders.Attempt] = []
-		for chart in Orders.ATTACKS:
-			group.append(Orders.Attempt.new(chart, beat_ms))
+		for chart in lesson.attacks:
+			group.append(Orders.Attempt.new(chart, beat_ms, divisions))
 		attack_orders.append(group)
-		guard_orders.append(Orders.Attempt.new(Orders.GUARDS[cycle], beat_ms))
+		guard_orders.append(Orders.Attempt.new(lesson.guards[cycle], beat_ms, divisions))
 	phase = Phase.PLAYING
 	queue_redraw()
 
@@ -307,11 +350,11 @@ func _midi_strike(note: int, input_ms: float) -> void:
 	if not lane.is_empty():
 		_strike(lane, input_ms)
 	elif phase == Phase.PLAYING:
-		_judge_strike("", input_ms)
+		_judge_strike("", input_ms, note == 37)
 	queue_redraw()
 
 
-func _judge_strike(lane: String, input_ms: float) -> void:
+func _judge_strike(lane: String, input_ms: float, cross_stick: bool = false) -> void:
 	var elapsed := input_ms - anchor_ms
 	var normal_bar := floori(elapsed / bar_ms)
 	var chosen_bar := normal_bar
@@ -324,15 +367,17 @@ func _judge_strike(lane: String, input_ms: float) -> void:
 	var cycle := chosen_bar >> 2
 	var active_bar := chosen_bar % 4
 	if active_bar == Orders.Bar.ATTACK:
-		_play_order(lane, relative, attack_orders[cycle], false)
+		_play_order(lane, relative, attack_orders[cycle], false, chosen_bar, cross_stick and course == 2)
 	elif active_bar == Orders.Bar.GUARD:
-		_play_order(lane, relative, [guard_orders[cycle]], true)
+		_play_order(lane, relative, [guard_orders[cycle]], true, chosen_bar)
 
 
-func _play_order(lane: String, relative: float, attempts: Array, defense: bool) -> void:
+func _play_order(lane: String, relative: float, attempts: Array, defense: bool, bar: int, one_drop_cross_stick: bool = false) -> void:
 	var best := INF
-	for attempt: Orders.Attempt in attempts:
-		var offset := attempt.accept(lane, relative)
+	for index in range(attempts.size()):
+		var attempt: Orders.Attempt = attempts[index]
+		var candidate_lane := SNARE if one_drop_cross_stick and index == 2 else lane
+		var offset := attempt.accept(candidate_lane, relative)
 		if absf(offset) < absf(best):
 			best = offset
 		if is_inf(offset) and relative >= 0.0:
@@ -343,15 +388,21 @@ func _play_order(lane: String, relative: float, attempts: Array, defense: bool) 
 		return
 	var precise := absf(best) <= Orders.PERFECT_MS
 	var label := "精准" if precise else "命中"
+	var played_lane := SNARE if one_drop_cross_stick else lane
+	if one_drop_cross_stick:
+		pad_hits[SNARE] = _clock()
 	var offset_label := "  /  %d ms %s" % [absi(roundi(best)), "偏早" if best < 0.0 else "偏晚"]
 	if defense:
 		guard_ms = _clock()
 		_impact("guard", 1.0 if precise else 0.68)
 		_react("格挡 " + label + offset_label, BLUE)
 	else:
-		_push_effect("hit", lane, 1.0 if precise else 0.65)
+		_push_effect("hit", played_lane, 1.0 if precise else 0.65)
 		_impact("hit", 1.0 if precise else 0.68)
 		_react("出招 " + label + offset_label, GOLD)
+	if precise and absf(relative) <= Orders.PERFECT_MS and accent_bar != bar:
+		accent_bar = bar
+		_impact("accent")
 
 
 func _resolve_attack(cycle: int) -> void:
@@ -364,7 +415,7 @@ func _resolve_attack(cycle: int) -> void:
 		var strong := attempt.perfect == attempt.notes.size()
 		var recommended: bool = index == Orders.RECOMMENDED[cycle]
 		var amount := 4 + int(strong) + 2 * int(recommended)
-		damage = mini(Orders.BOSS_ARMOR, damage + amount)
+		var previous_damage := _deal_damage(amount)
 		attacks_landed += 1
 		var kind: String = Orders.ATTACK_KINDS[index]
 		var reward := ""
@@ -377,7 +428,10 @@ func _resolve_attack(cycle: int) -> void:
 		break_ms = _clock()
 		_push_effect(kind, KICK, 1.0 if strong else 0.75)
 		_impact(kind, 1.0 if strong else 0.78)
-		_react(("%s成招  ·  破甲 %d" % [Orders.ATTACK_NAMES[index], amount]) + reward, GOLD)
+		if strong:
+			_queue_crew(1)
+		_armor_sound(previous_damage)
+		_react(("%s成招  ·  破甲 %d" % [lesson.attack_names[index], amount]) + reward, GOLD)
 		return
 	var plausible: Orders.Attempt
 	for attempt: Orders.Attempt in group:
@@ -396,9 +450,10 @@ func _resolve_guard(cycle: int) -> void:
 		counters += 1
 		var repairs := hull < Orders.SHIP_HULL
 		hull = mini(Orders.SHIP_HULL, hull + 1)
-		damage = mini(Orders.BOSS_ARMOR, damage + 2)
+		var previous_damage := _deal_damage(2)
 		_push_effect("counter", HAT, 1.0)
 		_impact("counter")
+		_armor_sound(previous_damage)
 		_react("反击成功  ·  船体回复" if repairs else "反击成功  ·  破甲 2", BLUE)
 		return
 	var missing := order.notes.size() - order.hits
@@ -419,15 +474,35 @@ func _resolve_guard(cycle: int) -> void:
 		_finish(false)
 
 
+func _deal_damage(amount: int) -> int:
+	var previous := damage
+	damage = mini(Orders.BOSS_ARMOR, damage + amount)
+	return previous
+
+
+func _armor_sound(previous_damage: int) -> void:
+	var half := Orders.BOSS_ARMOR * 0.5
+	var crossed_half := previous_damage < half and damage >= half
+	if crossed_half or (previous_damage < Orders.BOSS_ARMOR and damage == Orders.BOSS_ARMOR):
+		_impact("armor")
+	if crossed_half:
+		_queue_crew(3)
+
+
 func _finish(victory: bool) -> void:
 	phase = Phase.DONE
 	won = victory
 	coaching = _coach()
 	finished_ms = _clock()
 	if browser:
-		browser.stop()
+		browser.stop(true)
 	elif native_song:
+		_restore_native_mix()
 		native_song.stop()
+		native_voice.stop()
+	crew_end_ms = finished_ms
+	crew_call = -1
+	crew_pending.clear()
 	_impact("win" if won else "lose")
 	queue_redraw()
 
@@ -487,23 +562,116 @@ func _push_effect(kind: String, lane: String, strength: float) -> void:
 	effects.append({"kind": kind, "lane": lane, "start": _clock(), "strength": strength})
 
 
+func _queue_crew(line: int) -> void:
+	if not (crew_played & (1 << line)) and not crew_pending.has(line):
+		crew_pending.append(line)
+
+
+func _play_crew(line: int, at: float) -> bool:
+	var flag := 1 << line
+	if (crew_played & flag) or at < crew_end_ms:
+		return false
+	crew_played |= flag
+	crew_call = line
+	crew_call_ms = at
+	crew_end_ms = at + Sound.VOICE_GAP_MS
+	var name: String = Sound.VOICES[line]
+	if browser:
+		browser.voice(name)
+	elif native_voices.has(name):
+		var clip := native_voices[name]
+		native_voice.stream = clip
+		native_voice.play()
+		_duck_native_mix(clip.get_length())
+	return true
+
+
+func _update_crew(at: float) -> void:
+	if phase == Phase.DONE:
+		if won and at >= finished_ms + 780.0:
+			_play_crew(4, at)
+		return
+	if phase != Phase.PLAYING:
+		return
+	var elapsed := (at - anchor_ms) / beat_ms
+	if elapsed < 0.0:
+		if elapsed >= -1.65:
+			_play_crew(0, at)
+		return
+	# Call before the third boss demonstration, which teaches the densest sticking.
+	if elapsed >= 38.75 and elapsed < 39.3 and _play_crew(2, at):
+		return
+	if crew_pending.is_empty() or at < crew_end_ms:
+		return
+	if not (crew_played & (1 << 2)) and elapsed < 38.75 and elapsed + Sound.VOICE_GAP_MS / beat_ms >= 38.75:
+		return # Keep the approaching boss warning free of other crew lines.
+	# Delay event-driven lines if a recorded rehearsal note would be obscured.
+	for cue in cue_chart:
+		var cue_at := anchor_ms + float(cue[0]) * beat_ms
+		if cue_at >= at - 75.0 and cue_at < at + Sound.VOICE_GAP_MS:
+			return
+	_play_crew(crew_pending.pop_front(), at)
+
+
 func _impact(kind: String, strength: float = 1.0) -> void:
 	if browser:
 		browser.impact(kind, strength)
-	elif native_effects.has(kind):
-		if kind in ["win", "lose"]:
-			native_stinger.stream = native_effects[kind]
-			native_stinger.play()
-		else:
-			var playback := native_kit.get_stream_playback() as AudioStreamPlaybackPolyphonic
-			if playback:
-				playback.play_stream(native_effects[kind], 0.0, linear_to_db(maxf(0.05, strength)))
+		return
+	if not native_effects.has(kind):
+		return
+	var level := float(Sound.LEVELS[kind]) * clampf(strength, 0.45, 1.1)
+	if kind in ["win", "lose"]:
+		native_stinger.stream = native_effects[kind]
+		native_stinger.volume_db = linear_to_db(level)
+		native_stinger.play()
+		return
+	var at := _clock()
+	var sample := kind
+	if Sound.VARIANTS.has(kind):
+		if at - native_effect_clocks.get(kind, -INF) < Sound.COOLDOWN_MS[kind]:
+			return
+		native_effect_clocks[kind] = at
+		var variants: Array = Sound.VARIANTS[kind]
+		var index: int = native_effect_variants.get(kind, 0)
+		sample = variants[index]
+		native_effect_variants[kind] = (index + 1) % variants.size()
+	var position := (at - anchor_ms) * 0.001
+	var period := beat_ms * 0.001
+	if at < crew_end_ms or Sound.speech_is_near(position, period) or Sound.speech_is_near(position + 0.179, period):
+		level *= 0.58
+	elif Sound.DUCKED.has(kind):
+		_duck_native_mix()
+	var playback := native_kit.get_stream_playback() as AudioStreamPlaybackPolyphonic
+	if playback:
+		playback.play_stream(native_effects.get(sample, native_effects[kind]), 0.0, linear_to_db(level))
+
+
+func _restore_native_mix() -> void:
+	if native_duck:
+		native_duck.kill()
+		native_duck = null
+	if native_song.stream is AudioStreamSynchronized:
+		native_song.stream.set_sync_stream_volume(0, -2.0)
+
+
+func _duck_native_mix(voice_duration: float = 0.0) -> void:
+	var track := native_song.stream as AudioStreamSynchronized if native_song else null
+	if not track or not native_song.playing:
+		return
+	if native_duck:
+		native_duck.kill()
+	var set_music_gain := func(db: float) -> void: track.set_sync_stream_volume(0, db)
+	var floor_db := -7.0 if voice_duration > 0.0 else -4.5
+	native_duck = create_tween()
+	native_duck.tween_method(set_music_gain, track.get_sync_stream_volume(0), floor_db, 0.018)
+	native_duck.tween_interval(maxf(0.046, voice_duration - 0.018))
+	native_duck.tween_method(set_music_gain, floor_db, -2.0, 0.115)
 
 
 func _setup_native_audio() -> void:
-	for lane: String in Orders.LANES:
-		native_samples[lane] = _make_drum(lane)
-	for kind in ["hit", "power", "flurry", "break", "guard", "counter", "hurt"]:
+	for lane: String in [KICK, SNARE, HAT, TOM, Orders.CROSS, "click"]:
+		native_samples[lane] = load("res://audio/kit_%s.wav" % lane) as AudioStreamWAV
+	for kind in Sound.SAMPLES:
 		var path := "res://audio/impact_%s.wav" % kind
 		if ResourceLoader.exists(path, "AudioStream"):
 			native_effects[kind] = load(path) as AudioStream
@@ -511,6 +679,10 @@ func _setup_native_audio() -> void:
 		var path := "res://music/%s.ogg" % ("victory" if kind == "win" else "defeat")
 		if FileAccess.file_exists(path):
 			native_effects[kind] = AudioStreamOggVorbis.load_from_file(path)
+	for voice in Sound.VOICES:
+		var path := "res://voice/voice_%s.wav" % voice
+		if ResourceLoader.exists(path, "AudioStream"):
+			native_voices[voice] = load(path) as AudioStreamWAV
 	native_kit = AudioStreamPlayer.new()
 	var poly := AudioStreamPolyphonic.new()
 	poly.polyphony = 16
@@ -519,14 +691,19 @@ func _setup_native_audio() -> void:
 	native_kit.play()
 	native_stinger = AudioStreamPlayer.new()
 	add_child(native_stinger)
+	native_voice = AudioStreamPlayer.new()
+	native_voice.volume_db = -2.0
+	add_child(native_voice)
 	native_song = AudioStreamPlayer.new()
 	add_child(native_song)
 
 
 func _native_track(bpm: int) -> AudioStream:
-	if native_tracks.has(bpm):
-		return native_tracks[bpm]
-	var music := "res://music/battle_slow_native.ogg" if bpm == Orders.PRACTICE_BPM else "res://music/battle_native.ogg"
+	var key := Vector2i(course, bpm)
+	if native_tracks.has(key):
+		return native_tracks[key]
+	var speed_suffix := "_slow" if bpm == Orders.PRACTICE_BPM else ""
+	var music := "res://music/%s%s_native.ogg" % [lesson.backing, speed_suffix]
 	var has_score := ResourceLoader.exists(music, "AudioStream")
 	var cues := _make_track(not has_score, 60000.0 / bpm)
 	var result: AudioStream = cues
@@ -537,7 +714,7 @@ func _native_track(bpm: int) -> AudioStream:
 		synced.set_sync_stream(1, cues)
 		synced.set_sync_stream_volume(0, -2.0)
 		result = synced
-	native_tracks[bpm] = result
+	native_tracks[key] = result
 	return result
 
 
@@ -568,23 +745,6 @@ func _wav(samples: PackedFloat32Array, rate: int) -> AudioStreamWAV:
 	return stream
 
 
-func _drum_signal(lane: String, t: float) -> float:
-	var attack := minf(1.0, t / 0.002)
-	match lane:
-		KICK: return attack * 0.61 * sin(TAU * (44.0 * t + 3.1 * (1.0 - exp(-37.0 * t)))) * exp(-18.0 * t)
-		SNARE: return attack * (0.42 * randf_range(-1.0, 1.0) + 0.17 * sin(TAU * 178.0 * t)) * exp(-29.0 * t)
-		HAT: return attack * 0.38 * randf_range(-1.0, 1.0) * sin(TAU * 6480.0 * t) * exp(-72.0 * t)
-		_: return attack * 0.49 * sin(TAU * (97.0 * t + 1.45 * (1.0 - exp(-63.0 * t)))) * exp(-18.0 * t)
-
-
-func _make_drum(lane: String) -> AudioStreamWAV:
-	const RATE := 24000
-	var samples := PackedFloat32Array()
-	samples.resize(int(RATE * 0.27))
-	for index in range(samples.size()):
-		var t := float(index) / RATE
-		samples[index] = _drum_signal(lane, t) * minf(1.0, (samples.size() - index) / 144.0)
-	return _wav(samples, RATE)
 
 
 func _make_track(include_simple_groove: bool, tempo_beat_ms: float) -> AudioStreamWAV:
@@ -594,22 +754,40 @@ func _make_track(include_simple_groove: bool, tempo_beat_ms: float) -> AudioStre
 	samples.resize(ceili(beat_samples * (4.0 + Orders.BAR_COUNT * 4.0)))
 	for beat in range(4):
 		var position := roundi(beat * beat_samples)
-		var frequency := 1180.0 if beat == 0 else 825.0
-		for sample in range(1200):
-			var t := float(sample) / RATE
-			samples[position + sample] += sin(TAU * frequency * t) * exp(-105.0 * t) * 0.23
+		_mix_pcm(samples, RATE, position, native_samples.get("click"), 0.60 if beat == 0 else 0.40)
 	if include_simple_groove:
 		for beat in range(4, 4 + Orders.BAR_COUNT * 4, 2):
 			var position := roundi(beat * beat_samples)
-			var root := float([98.0, 130.81, 82.41, 110.0][((beat - 4) >> 2) % 4])
-			for sample in range(8000):
-				var t := float(sample) / RATE
-				samples[position + sample] += sin(TAU * root * t) * exp(-15.0 * t) * 0.15
+			_mix_pcm(samples, RATE, position, native_samples.get(KICK), 0.32)
 	for cue in cue_chart:
 		var position := roundi((4.0 + float(cue[0])) * beat_samples)
-		for sample in range(6200):
-			samples[position + sample] += _drum_signal(String(cue[1]), float(sample) / RATE) * 0.64
+		_mix_pcm(samples, RATE, position, native_samples.get(String(cue[1])), 0.68 * float(cue[2]) / 127.0)
+	for cue in Sound.scheduled_effects():
+		var kind := String(cue[0])
+		var at := (4.0 + float(cue[1])) * beat_samples + float(cue[2]) * RATE
+		_mix_native_effect(samples, RATE, roundi(at), kind)
 	return _wav(samples, RATE)
+
+
+func _mix_native_effect(samples: PackedFloat32Array, rate: int, at: int, kind: String) -> void:
+	var stream := native_effects.get(kind) as AudioStreamWAV
+	_mix_pcm(samples, rate, at, stream, float(Sound.LEVELS[kind]))
+
+
+func _mix_pcm(samples: PackedFloat32Array, rate: int, at: int, stream: AudioStreamWAV, gain: float) -> void:
+	if not stream or stream.format != AudioStreamWAV.FORMAT_16_BITS or stream.stereo:
+		return
+	var pcm := stream.data
+	var frames := pcm.size() >> 1
+	var ratio := float(stream.mix_rate) / rate
+	var amount := mini(samples.size() - at, floori((frames - 1) / ratio))
+	var level := gain / 32768.0
+	for index in range(amount):
+		var position := index * ratio
+		var frame := floori(position)
+		var left := float(pcm.decode_s16(frame * 2))
+		var right := float(pcm.decode_s16(frame * 2 + 2))
+		samples[at + index] += lerpf(left, right, position - frame) * level
 
 
 func _line(text: String, at: Vector2, point_size: int, color: Color = IVORY) -> void:
@@ -738,7 +916,7 @@ func _draw_battle(elapsed: float) -> void:
 				var pulse := (1.0 - age / 245.0) ** 2
 				if pulse > cue_strength:
 					cue_strength = pulse
-					cue_color = LANE_COLORS[cue[1]]
+					cue_color = LANE_COLORS.get(cue[1], BLUE)
 	var shatter := 0.0
 	if phase == Phase.DONE and won:
 		shatter = clampf((now_ms - finished_ms) / 940.0, 0.0, 1.0)
@@ -798,8 +976,8 @@ func _slam_progress(elapsed: float) -> float:
 	if phase != Phase.PLAYING or elapsed < 0.0:
 		return -1.0
 	var cycle := clampi(floori(elapsed / (4.0 * bar_ms)), 0, 3)
-	var first_step := int(Orders.GUARDS[cycle][0][0])
-	var impact_beat := cycle * 16.0 + 12.0 + first_step / 4.0
+	var first_step := int(lesson.guards[cycle][0][0])
+	var impact_beat := cycle * 16.0 + 12.0 + float(first_step) / divisions
 	# Frame eight is paced onto the score so the asset never becomes a clock.
 	return (elapsed - impact_beat * beat_ms + beat_ms / 2.0) / beat_ms
 
@@ -911,8 +1089,8 @@ func _draw_pad(lane: String) -> void:
 func _draw_status(elapsed: float, bar: int) -> void:
 	var left := STATUS.position.x + 16.0
 	var title := "迎击轰壳蟹"
-	var subtitle := "用真实架子鼓律动出招。"
-	var detail := "初学可切换到 72 BPM。"
+	var subtitle := "%s  ·  三种实用节奏" % lesson.name
+	var detail := "按 L 换课组，B 切到 72 BPM。"
 	var tint := GOLD
 	if phase == Phase.STARTING:
 		title = "准备音频"
@@ -926,23 +1104,23 @@ func _draw_status(elapsed: float, bar: int) -> void:
 			match bar % 4:
 				Orders.Bar.SCOUT:
 					title = "侦察示范"
-					subtitle = "弱点建议：%s" % Orders.ATTACK_NAMES[Orders.RECOMMENDED[cycle]]
-					detail = "听示范，下一小节可打任意一式。"
+					subtitle = "弱点建议：%s" % lesson.attack_names[Orders.RECOMMENDED[cycle]]
+					detail = lesson.attack_guides[Orders.RECOMMENDED[cycle]]
 					tint = BLUE
 				Orders.Bar.ATTACK:
 					title = "自由出招"
-					subtitle = "本轮弱点：%s" % Orders.ATTACK_NAMES[Orders.RECOMMENDED[cycle]]
-					detail = "连射修船，碎浪得盾。只打一行。"
+					subtitle = "本轮弱点：%s" % lesson.attack_names[Orders.RECOMMENDED[cycle]]
+					detail = "只打一行；一落雷鬼实鼓可横击。" if course == 2 else "连射修船，碎浪得盾。只打一行。"
 					tint = GOLD
 				Orders.Bar.LISTEN:
 					title = "听首领出招"
-					subtitle = Orders.GUARD_NAMES[cycle]
-					detail = Orders.GUARD_GUIDES[cycle]
+					subtitle = lesson.guard_names[cycle]
+					detail = lesson.guides[cycle]
 					tint = SALMON
 				Orders.Bar.GUARD:
 					title = "跟拍防守"
-					subtitle = Orders.GUARD_NAMES[cycle]
-					detail = Orders.GUARD_GUIDES[cycle]
+					subtitle = lesson.guard_names[cycle]
+					detail = lesson.guides[cycle]
 					tint = BLUE
 			_line("第 %d / 16 小节" % [bar + 1], Vector2(STATUS.end.x - 104.0, 148), 13, MUTED)
 	elif phase == Phase.DONE:
@@ -982,37 +1160,40 @@ func _draw_health() -> void:
 
 
 func _draw_score(elapsed: float, bar: int) -> void:
-	const CELL := 57.0
 	const LEFT := 196.0
 	const BOTTOM := 587.0
+	var steps := divisions * 4
+	var cell := 912.0 / steps
 	var active := phase == Phase.PLAYING and elapsed >= 0.0
 	var context := bar % 4 if active else Orders.Bar.ATTACK
 	var cycle := bar >> 2
-	var active_step := clampi(floori((elapsed - bar * bar_ms) / (beat_ms * 0.25)), 0, 15) if active else -1
+	var active_step := clampi(floori((elapsed - bar * bar_ms) / (beat_ms / divisions)), 0, steps - 1) if active else -1
 	_panel(GRID, Color("#172638"), Color("#4d6177"), 11)
-	_line("鼓点指令", Vector2(55, 480), 19)
-	for step in range(16):
-		var quarter := step % 4 == 0
-		var x := LEFT + CELL * step
+	_line("三连鼓点" if divisions == 3 else "鼓点指令", Vector2(55, 480), 19)
+	for step in range(steps):
+		var subdivision := step % divisions
+		var quarter := subdivision == 0
+		var x := LEFT + cell * step
 		if quarter:
 			draw_line(Vector2(x - 4, 460), Vector2(x - 4, BOTTOM), Color("#3d536e"), 2.0, true)
 		if step == active_step:
-			draw_rect(Rect2(x - 2, 459, CELL - 3, BOTTOM - 458), Color(0.38, 0.68, 0.82, 0.19))
-		var label: String = str((step >> 2) + 1) if quarter else ["", "e", "&", "a"][step % 4]
-		_center(label, x + CELL * 0.5, 478.0, 16, IVORY if quarter or step == active_step else MUTED)
+			draw_rect(Rect2(x - 2, 459, cell - 3, BOTTOM - 458), Color(0.38, 0.68, 0.82, 0.19))
+		var labels := ["", "tri", "let"] if divisions == 3 else ["", "e", "&", "a"]
+		var label: String = str(floori(float(step) / divisions) + 1) if quarter else labels[subdivision]
+		_center(label, x + cell * 0.5, 478.0, 16, IVORY if quarter or step == active_step else MUTED)
 	if context in [Orders.Bar.ATTACK, Orders.Bar.SCOUT]:
-		for index in range(Orders.ATTACKS.size()):
+		for index in range(lesson.attacks.size()):
 			var state: Orders.Attempt = attack_orders[cycle][index] if active and context == Orders.Bar.ATTACK else null
 			var row_y := 504.0 + index * 31.0
 			var suggested: bool = active and index == Orders.RECOMMENDED[cycle]
-			var label: String = Orders.ATTACK_NAMES[index]
+			var label: String = lesson.attack_names[index]
 			if suggested:
 				label += "★"
 			var cue_row := context == Orders.Bar.SCOUT and suggested
-			_draw_order_row(Orders.ATTACKS[index], label, row_y, LEFT, CELL, state, active_step, cue_row, suggested)
+			_draw_order_row(lesson.attacks[index], label, row_y, LEFT, cell, state, active_step, cue_row, suggested)
 	else:
 		var state := guard_orders[cycle] if context == Orders.Bar.GUARD else null
-		_draw_order_row(Orders.GUARDS[cycle], "防守谱", 519, LEFT, CELL, state, active_step, context == Orders.Bar.LISTEN, false, Orders.GUARD_HANDS[cycle])
+		_draw_order_row(lesson.guards[cycle], "防守谱", 519, LEFT, cell, state, active_step, context == Orders.Bar.LISTEN, false, lesson.hands[cycle])
 		var reads := "同列为合击，空格不打。"
 		if state:
 			reads = "%d / %d 命中  ·  多击 %d" % [state.hits, state.notes.size(), state.extras]
@@ -1024,43 +1205,59 @@ func _draw_order_row(
 	chart: Array, label: String, y: float, left: float, width: float,
 	state: Orders.Attempt, current_step: int, is_preview: bool, suggested: bool = false, hands: String = ""
 ) -> void:
-	_line(label, Vector2(55, y + 5.0), 17, GOLD if suggested else IVORY)
+	_line(label, Vector2(51, y + 5.0), 16, GOLD if suggested else IVORY)
 	draw_line(Vector2(left + 1.0, y + 15.0), Vector2(GRID.end.x - 12.0, y + 15.0), Color("#294156"), 1.0)
-	var previous := -1
-	var count := 0
-	for index in range(chart.size()):
+	var index := 0
+	while index < chart.size():
 		var step := int(chart[index][0])
-		if step != previous:
-			previous = step
-			count = 0
-		var lane := String(chart[index][1])
-		var lit := is_preview and current_step == step
-		var hit := state.filled(index) if state else false
-		var ink: Color = LANE_COLORS[lane]
-		var x := left + width * step + width / 2.0
-		if index + 1 < chart.size() and int(chart[index + 1][0]) == step:
-			x -= 13.3
-		if count > 0:
-			x += 13.3
-		var expired := state and current_step > step + 1 and not hit
-		var dot := Vector2(x, y - 1)
-		draw_circle(dot, 12.0, ink if lit or hit else ink.darkened(0.69), true, -1.0, true)
-		if not lit and not hit:
-			draw_circle(dot, 12.0, Color(ink, 0.35 if expired else 0.88), false, 1.6, true)
-		_center(LANE_GLYPHS[lane], x, y + 5.0, 16, INK if lit or hit else IVORY)
-		if index < hands.length() and hands[index] != " ":
-			_center(hands[index], x, y + 34.0, 17, BLUE if hands[index] == "R" else GOLD)
-		count += 1
+		var group_end := index + 1
+		while group_end < chart.size() and int(chart[group_end][0]) == step:
+			group_end += 1
+		var count := group_end - index
+		var crowded := count > 2 and width < 70.0
+		var radius := 8.7 if crowded else 12.0
+		var spacing := 18.0 if crowded else 26.6
+		var first_x := left + width * (float(step) + 0.5) - spacing * (count - 1) * 0.5
+		for note_index in range(index, group_end):
+			var x := first_x + (note_index - index) * spacing
+			var lane := String(chart[note_index][1])
+			var lit := is_preview and current_step == step
+			var hit := state.filled(note_index) if state else false
+			var ink: Color = LANE_COLORS[lane]
+			var expired := state and current_step > step + 1 and not hit
+			var dot := Vector2(x, y - 1)
+			draw_circle(dot, radius, ink if lit or hit else ink.darkened(0.69), true, -1.0, true)
+			if not lit and not hit:
+				draw_circle(dot, radius, Color(ink, 0.35 if expired else 0.88), false, 1.6, true)
+			_center(LANE_GLYPHS[lane], x, y + (3.8 if crowded else 5.0), 13 if crowded else 16, INK if lit or hit else IVORY)
+			if note_index < hands.length() and hands[note_index] != " ":
+				_center(hands[note_index], x, y + 34.0, 17, BLUE if hands[note_index] == "R" else GOLD)
+		index = group_end
 
 
 func _guide_visible() -> bool:
 	return phase == Phase.IDLE or (phase == Phase.DONE and now_ms - finished_ms >= VICTORY_MS)
 
 
+func _draw_crew_call() -> void:
+	const CAST := ["领鼓", "船员", "船长", "领鼓与船员", "全船"]
+	const LINES := ["起锚！", "嗨哟！", "当心！", "破浪！", "嘿，好样的！"]
+	var speaker := crew_call
+	var age := now_ms - crew_call_ms
+	if speaker < 0 or age < 0.0 or age > 1250.0 or (phase == Phase.DONE and _guide_visible()):
+		return
+	var color := SALMON if speaker == 2 else GOLD
+	var box := Rect2(62, 344, 190, 78)
+	_panel(box, Color("#142e3a"), color, 12)
+	_line(CAST[speaker], box.position + Vector2(15, 25), 16, color)
+	_line(LINES[speaker], box.position + Vector2(15, 60), 27, IVORY)
+
+
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, 1152, 720), INK)
 	_line("潮汐鼓港", Vector2(36, 66), 36)
-	_line("鼓浪迎击    /    %d BPM    /    4/4" % tempo, Vector2(39, 91), 14, GOLD)
+	var meter := "三连音" if divisions == 3 else "4/4"
+	_line("鼓浪迎击    /    %d BPM    /    %s" % [tempo, meter], Vector2(39, 91), 14, GOLD)
 	if not midi_readout.is_empty():
 		_line(midi_readout, Vector2(278, 70), 17, BLUE)
 	_draw_transport()
@@ -1071,13 +1268,17 @@ func _draw() -> void:
 	_panel(STATUS, Color("#12212c").darkened(0.16) * Color(1, 1, 1, 0.94), Color("#4b5960"), 13)
 	_draw_status(elapsed, bar)
 	_draw_health()
+	_draw_crew_call()
 	var show_guide := _guide_visible()
 	if browser and guide_link_visible != show_guide:
 		browser.setGuideVisible(show_guide)
 		guide_link_visible = show_guide
 	if show_guide:
 		_panel(GUIDE_BUTTON, Color("#173b47"), BLUE, 9)
-		_center("查看七张练习谱", GUIDE_BUTTON.get_center().x, GUIDE_BUTTON.get_center().y + 8.0, 22, IVORY)
+		_center("查看练习谱", GUIDE_BUTTON.get_center().x, GUIDE_BUTTON.get_center().y + 8.0, 22, IVORY)
+		_panel(COURSE_BUTTON, Color("#2c3427"), GOLD, 9)
+		_center("课组 %d / 4  ·  %s" % [course + 1, lesson.name], COURSE_BUTTON.get_center().x, 391.0, 18, IVORY)
+		_center("换组  /  L", COURSE_BUTTON.get_center().x, 413.0, 14, GOLD)
 	_draw_score(elapsed, bar)
 	for lane: String in Orders.LANES:
 		_draw_pad(lane)

@@ -1,11 +1,12 @@
 # 潮汐鼓港 · 鼓浪迎击
 
-用架子鼓指挥鼓船。先听一小节，然后用四分摇滚、八分摇滚或四踩舞曲出招。首领还击时，用单跳、双跳、单复合跳和过门接招。四轮结束后可查看击打偏早或偏晚，以及值得单练的鼓位。72 BPM 慢练与 96 BPM 原速都使用同调的完整伴奏。
+用架子鼓指挥鼓船。四个课组提供 12 种进攻律动和 8 种防守练习。先从摇滚的二、四拍入门，再练底鼓连踩、放克十六分、雷鬼 One Drop，最后在真正的三连音网格上打 Shuffle 和慢蓝调。听一小节、回打一小节。四轮结束后可看击打偏差和最容易漏的鼓位。72 BPM 慢练与 96 BPM 原速都使用同调的完整伴奏。
 
 - [游戏策划与首领谱面](docs/game-design.md)
 - [平板练习谱](https://drum-lab.windssea526.workers.dev/practice/) · [鼓谱源文件、手脚分工与教学出处](docs/drum-vocabulary.md)
 - [实机完整对战录像（含游戏原声）](art/motion/battle-playthrough.mp4)
-- [战斗配乐与重建方法](docs/music-score.md) · [Grok 战斗动画](docs/motion-production.md)
+- [直接试听战斗原声](https://drum-lab.windssea526.workers.dev/index.theme.ogg) · [Gemini 配乐与节拍校对](docs/music-score.md)
+- [角色人声](docs/character-voices.md) · [战斗音效](docs/sound-effects.md) · [Grok 战斗动画](docs/motion-production.md)
 - [场景、角色与攻击演出设定](art/concepts/README.md)
 - [首战原型验证与复测命令](docs/verification.md)
 - [Web 游戏入口](https://drum-lab.windssea526.workers.dev/) · [自定义域名](https://drum.nanokid.win/)
@@ -13,7 +14,7 @@
 
 ## 运行首关
 
-在 Godot 4.7.2 打开 `game/project.godot`，按 F5 运行。Web 版先点顶栏速度或按 B 切换 72／96 BPM，点开始或按空格开战。平板底部四块鼓垫支持同击，键盘 D／F／J／K 依次对应底鼓、军鼓、踩镲与通鼓。罗兰模块通过 USB MIDI 接入，在支持 Web MIDI 的浏览器中选择连接。模块本机负责实体鼓的返听。
+在 Godot 4.7.2 打开 `game/project.godot`，按 F5 运行。Web 版在开战前点课组按钮或按 L 切换三张进攻谱，用顶部速度按钮或 B 切换 72／96 BPM，点开始或按空格开战。平板底部四块鼓垫支持同击，键盘 D／F／J／K 依次对应底鼓、军鼓、踩镲与通鼓。罗兰模块通过 USB MIDI 接入，在支持 Web MIDI 的浏览器中选择连接。模块本机负责实体鼓的返听。
 
 ## 导出与发布
 

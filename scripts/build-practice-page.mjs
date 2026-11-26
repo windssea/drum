@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const source = new URL('../docs/drum-vocabulary.md', import.meta.url)
+const audioSource = new URL('./practice-audio.js', import.meta.url)
 const output = process.argv[2] ?? fileURLToPath(new URL('../build/web/practice/index.html', import.meta.url))
 const repoDocs = 'https://github.com/windssea/drum/blob/main/docs/'
 
@@ -35,6 +36,35 @@ function inline(source) {
   return markup + escape(source.slice(end))
 }
 
+function renderScore(lines, name) {
+  const score = '<pre tabindex="0" aria-label="' + escape(name + ' 鼓谱') + '"><code>' +
+    escape(lines.join('\n')) + '</code></pre>'
+  const fields = (line) => line.trim().split(/\s+/u).filter((cell) => cell !== '|')
+  const [count, ...grid] = fields(lines[0] ?? '')
+  if (count !== 'Count') return score
+
+  const columns = grid.length
+  if (![8, 12, 16].includes(columns)) throw new Error('Invalid score subdivision in ' + name)
+  const snare = name.includes('一落雷鬼') ? 'stick' : 'snare'
+  const laneNames = { H: 'hat', S: snare, K: 'kick', T: 'tom' }
+  const events = []
+  for (const line of lines.slice(1)) {
+    const [lane, ...cells] = fields(line)
+    if (!Object.hasOwn(laneNames, lane)) continue
+    if (cells.length !== columns || cells.some((cell) => cell !== 'x' && cell !== '-')) {
+      throw new Error('Invalid ' + lane + ' row in ' + name)
+    }
+    for (const [column, cell] of cells.entries()) {
+      if (cell === 'x') events.push([column, laneNames[lane]])
+    }
+  }
+  events.sort((a, b) => a[0] - b[0])
+  const button = '<button type="button" hidden aria-pressed="false" data-practice-play' +
+    ' data-practice-title="' + escape(name) + '" data-practice-columns="' + columns +
+    '" data-practice-events="' + escape(JSON.stringify(events)) + '">听两小节</button>'
+  return '<div class="score">' + score + button + '</div>'
+}
+
 function render(markdown) {
   const lines = markdown.split(/\r?\n/u)
   const title = lines[0].match(/^#\s+(.+)$/u)?.[1]
@@ -65,10 +95,7 @@ function render(markdown) {
       const start = index
       while (index < lines.length && !fencePattern.test(lines[index])) index++
       if (index === lines.length) throw new Error('Unclosed practice score block on line ' + start)
-      body.push(
-        '<pre tabindex="0" aria-label="' + escape(scoreName + ' 鼓谱') + '"><code>' +
-          escape(lines.slice(start, index).join('\n')) + '</code></pre>',
-      )
+      body.push(renderScore(lines.slice(start, index), scoreName))
       index++
       continue
     }
@@ -112,6 +139,7 @@ const css = `
     --stroke: #3b465c;
   }
   * { box-sizing: border-box }
+  [hidden] { display: none !important }
   body { margin: 0 }
   .wrap {
     width: min(100%, 58rem);
@@ -127,12 +155,12 @@ const css = `
   h1 { margin: .42rem 0 1rem; font-size: clamp(2rem, 5.6vw, 3.75rem) }
   h2 { border-top: 1px solid var(--stroke); padding-top: 1.2rem; margin: 2.1rem 0 .6rem; font-size: 1.58rem }
   h3 { margin: 1.65rem 0 .35rem; font-size: 1.22rem; color: var(--accent) }
-  h1, h2, h3, h4, h5, h6 { scroll-margin-top: 1rem; line-height: 1.35 }
+  h1, h2, h3, h4, h5, h6 { scroll-margin-top: 5rem; line-height: 1.35 }
   main { padding-block: .25rem 3rem }
   p { margin: 0 0 .9rem }
   nav { display: flex; flex-wrap: wrap; gap: .42rem; align-items: stretch }
   a { color: var(--accent); text-underline-offset: .18em; overflow-wrap: anywhere }
-  a:focus-visible, pre:focus-visible { outline: 3px solid #a4edf0; outline-offset: 3px }
+  :where(a, pre, button, select):focus-visible { outline: 3px solid #a4edf0; outline-offset: 3px }
   .back, nav a {
     display: inline-flex;
     align-items: center;
@@ -146,6 +174,37 @@ const css = `
   nav a { background: #151e2e }
   nav a:hover { border-color: var(--accent) }
   :target { color: var(--accent) }
+  .practice-controls {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    border-bottom: 1px solid var(--stroke);
+    background: #182131;
+    padding-block: max(.48rem, env(safe-area-inset-top)) .48rem;
+  }
+  .practice-controls > .wrap {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    flex-wrap: wrap;
+  }
+  .practice-controls label { white-space: nowrap }
+  button, select {
+    min-height: 44px;
+    padding: .28rem .68rem;
+    border: 1px solid var(--stroke);
+    border-radius: .4rem;
+    background: #273751;
+    color: inherit;
+    font: inherit;
+  }
+  button:not(:disabled) { cursor: pointer }
+  button:disabled { opacity: .6 }
+  button[aria-pressed="true"] { background: var(--accent); color: #222331 }
+  [data-practice-status] { flex-basis: 100%; font-size: .88rem }
+  [data-practice-status]:empty { display: none }
+  .score { margin-bottom: 1.25rem }
+  .score pre { margin-bottom: .42rem }
   code { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace }
   pre {
     margin: 0 0 1.25rem;
@@ -163,12 +222,17 @@ const css = `
   }
   li { margin-bottom: .6rem }
   ol, ul { padding-inline-start: 1.6rem }
+  @media (min-width: 45rem) {
+    :root { font-size: clamp(18px, 2.35vw, 22px) }
+    pre { font-size: 1.08rem }
+    [data-practice-status] { flex-basis: auto }
+  }
   @media print {
     :root { color-scheme: light; color: black; background: white; font-size: 10.5pt }
     .mast, pre { color: black; background: white; border-color: #777 }
     .mast { padding-block: 0 .5rem; border-top: 0 }
     .wrap { width: 100%; padding-inline: 0 }
-    .back, nav { display: none }
+    .back, nav, .practice-controls, .soundtrack, [data-practice-play] { display: none }
     h1 { font-size: 24pt }
     h2 { margin-top: 1.25rem; font-size: 16pt }
     h3, a, :target { color: black }
@@ -179,13 +243,28 @@ const css = `
 
 const { title, sections, body } = render(readFileSync(source, 'utf8'))
 const navigation = sections.map(({ name, id }) => '<a href="#' + escape(id) + '">' + inline(name) + '</a>').join('\n')
+const controls = '<div class="practice-controls" hidden data-practice-controls><div class="wrap">' +
+  '<label>试听速度 <select data-practice-tempo><option value="72">72 BPM</option><option value="96">96 BPM</option></select></label>' +
+  '<button type="button" data-practice-stop disabled>停止试听</button>' +
+  '<span data-practice-status role="status"></span></div></div>'
+const audio = readFileSync(audioSource, 'utf8').replace(/<\/script/giu, '<\\/script')
+const kit = {}
+for (const name of ['kick', 'snare', 'hat', 'tom', 'cross']) {
+  kit[name === 'cross' ? 'stick' : name] =
+    readFileSync(new URL('../game/audio/kit_' + name + '.wav', import.meta.url)).toString('base64')
+}
 const html = '<!doctype html>\n<html lang="zh-CN">\n<head>\n' +
   '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
   '<meta name="theme-color" content="#101623"><title>' + escape(title) + ' · 潮汐鼓港</title>\n' +
   '<style>' + css + '</style>\n</head>\n<body>\n' +
   '<header class="mast"><div class="wrap"><a class="back" href="/">← 返回游戏</a><h1>' + inline(title) + '</h1>\n' +
   '<nav aria-label="练习谱目录">' + navigation + '</nav></div></header>\n' +
-  '<main class="wrap">' + body + '</main>\n</body>\n</html>\n'
+  controls + '\n<main class="wrap">' + body +
+  '<section class="soundtrack"><h2>战斗原声《鼓浪回击》</h2>' +
+  '<audio controls preload="none" data-soundtrack src="/index.theme.ogg" aria-label="鼓浪回击完整配乐"></audio>' +
+  '<p><a href="/index.credits.txt">演出与声音来源</a></p></section></main>\n' +
+  '<script type="application/json" id="practice-kit">' + JSON.stringify(kit) + '</script>\n' +
+  '<script>' + audio + '</script>\n</body>\n</html>\n'
 mkdirSync(dirname(output), { recursive: true })
 writeFileSync(output, html)
 console.log('Practice guide: ' + output)

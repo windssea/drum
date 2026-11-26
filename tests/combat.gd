@@ -19,6 +19,8 @@ func _initialize() -> void:
 	_test_phase_boundaries(harbor)
 	_test_failure_and_retry(harbor)
 	_test_practice_and_feedback(harbor)
+	_test_course_library(harbor)
+	_test_one_drop_cross_stick(harbor)
 	harbor.free()
 	print("Harbor combat: %d passed, %d failed" % [passed, failed])
 	quit(0 if failed == 0 else 1)
@@ -66,7 +68,7 @@ func _start(harbor: Harbor) -> void:
 
 
 func _hit(harbor: Harbor, bar: int, step: int, lane: String, offset: float = 0.0) -> void:
-	harbor._browser_event(["hit", lane, ORIGIN + bar * harbor.bar_ms + step * harbor.beat_ms / 4.0 + offset, 100])
+	harbor._browser_event(["hit", lane, ORIGIN + bar * harbor.bar_ms + step * harbor.beat_ms / harbor.divisions + offset, 100])
 
 
 func _play(harbor: Harbor, bar: int, chart: Array) -> void:
@@ -239,3 +241,70 @@ func _test_practice_and_feedback(harbor: Harbor) -> void:
 	_expect(harbor.coaching, "中位偏早 20 ms  ·  先练军鼓", "actionable median timing and target lane")
 	harbor._browser_event(["tempo"])
 	_expect(harbor.tempo, 96, "standard tempo can be restored for retry")
+
+
+func _test_course_library(harbor: Harbor) -> void:
+	harbor._reset()
+	_expect(Orders.COURSES.size(), 4, "each of the twelve attacks belongs to one of four lessons")
+	for course in range(Orders.COURSES.size()):
+		var lesson: Dictionary = Orders.COURSES[course]
+		_expect([harbor.course, harbor.divisions], [course, 3 if course == 3 else 4], "lesson selects the correct grid")
+		_expect([lesson.attacks.size(), lesson.guards.size()], [3, 4], "all twelve attacks and four responses per lesson")
+		var pending_cues := Orders.cues(course)
+		_expect(harbor.cue_chart, pending_cues, "lesson changes the actual scheduled listening cues")
+		var cross_cues := pending_cues.filter(func(cue: Array) -> bool: return cue[1] == Orders.CROSS)
+		_expect(cross_cues, [[34.0, Orders.CROSS, 106]] if course == 2 else [],
+			"only the one-drop scout uses a cross-stick sound, on beat three")
+		var configured := true
+		for chart: Array in lesson.attacks + lesson.guards:
+			var seen := {}
+			var previous := -1
+			for note in chart:
+				var key := "%d/%s" % [note[0], note[1]]
+				configured = configured and note[0] >= previous and note[0] < lesson.divisions * 4 and not seen.has(key)
+				seen[key] = true
+				previous = note[0]
+		_expect(configured, true, "each chart is sorted, within its real grid, with no duplicate lane notes")
+		for bpm in [96, 72]:
+			if harbor.tempo != bpm:
+				harbor._browser_event(["tempo"])
+			_start(harbor)
+			harbor._browser_event(["course"])
+			_expect([harbor.course, harbor.tempo], [course, bpm], "lessons and tempo stay fixed in combat")
+			for cycle in range(4):
+				var attack := cycle * 4 + Orders.Bar.ATTACK
+				var guard := cycle * 4 + Orders.Bar.GUARD
+				var skill: Array = lesson.attacks[Orders.RECOMMENDED[cycle]]
+				_play(harbor, attack, skill)
+				_settle(harbor, attack)
+				_expect(harbor.attacks_landed, cycle + 1, "chosen groove registers without extra phantom chord strikes")
+				_play(harbor, guard, lesson.guards[cycle])
+				_settle(harbor, guard)
+				_expect(harbor.counters, cycle + 1, "every response follows its group timing and chord rules")
+			_expect([harbor.damage, harbor.hull, harbor.extras, harbor.missed, harbor.won], [28, 8, 0, 0, true],
+				"each lesson wins in both the original and practice tempos")
+		harbor._browser_event(["tempo"])
+		harbor._browser_event(["course"])
+	_expect([harbor.course, harbor.tempo, harbor.phase], [0, 96, Harbor.Phase.IDLE], "last course wraps around and refreshes the battle")
+
+
+func _test_one_drop_cross_stick(harbor: Harbor) -> void:
+	harbor._browser_event(["course"])
+	harbor._browser_event(["course"])
+	_start(harbor)
+	var lesson: Dictionary = Orders.COURSES[2]
+	for note in lesson.attacks[2]:
+		if note[1] == Orders.SNARE:
+			harbor._browser_event(["hit", "midi_extra", ORIGIN + harbor.bar_ms + 2.0 * harbor.beat_ms, 100, 37])
+		else:
+			_hit(harbor, 1, note[0], note[1])
+	_settle(harbor, 1)
+	_expect([harbor.attacks_landed, harbor.shield, harbor.extras], [1, 1, 0], "genuine cross-stick can finish the one-drop groove")
+	var guard_beat := ORIGIN + 3.0 * harbor.bar_ms
+	harbor._browser_event(["hit", "midi_extra", guard_beat, 100, 37])
+	_expect([harbor.guard_orders[0].hits, harbor.guard_orders[0].extras], [0, 1], "cross-stick is still off-chart on this lesson's snare drill")
+
+	_start(harbor)
+	_play(harbor, 1, lesson.attacks[2])
+	_settle(harbor, 1)
+	_expect(harbor.attacks_landed, 1, "touch snare / MIDI head remain a valid one-drop practice adaptation")

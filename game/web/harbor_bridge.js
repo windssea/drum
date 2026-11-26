@@ -8,9 +8,18 @@
   const contextConstructor = window.AudioContext || window.webkitAudioContext
   const clips = new Map()
   const decoding = new Map()
-  const kit = new Map()
+  const scoreFiles = new Map()
+  let scoreCache
   const scheduled = new Set()
-  let audio, master, sceneBus, musicBus, decoder
+  const activeImpacts = new Set()
+  const activeVoices = new Set()
+  let audio, master, sceneBus, musicBus, effectsBus, decoder
+  let impactProfile
+  let songStart = null
+  let songBeat = 0
+  let crewEnd = -Infinity
+  const lastEffect = new Map()
+  const nextVariant = new Map()
   let midiAccess, currentMidi, send
   let guideLink
   let midiPending = false,
@@ -27,6 +36,10 @@
   }
   function setClip(name, encoded) {
     const data = unpack(encoded)
+    if (name.startsWith('battle')) {
+      scoreFiles.set(name, data)
+      return
+    }
     const job = offline()
       .decodeAudioData(data.buffer)
       .then((buffer) => clips.set(name, buffer))
@@ -34,6 +47,21 @@
         console.error('Cannot decode battle music', name, error.message)
       })
     decoding.set(name, job)
+  }
+  function scoreFor(name) {
+    if (scoreCache?.name === name) return scoreCache.decoded
+    const file = scoreFiles.get(name)
+    if (!file) throw new Error('Missing score: ' + name)
+    // Decoding detaches its input and expands it to stereo float PCM.
+    // Keep only the selected arrangement decoded on memory-constrained tablets.
+    const decoded = offline()
+      .decodeAudioData(file.buffer.slice(0))
+      .catch((error) => {
+        if (scoreCache?.decoded === decoded) scoreCache = undefined
+        throw error
+      })
+    scoreCache = { name, decoded }
+    return decoded
   }
   function setPcm(name, encoded, rate) {
     const bytes = unpack(encoded)
@@ -44,31 +72,6 @@
     clips.set(name, buffer)
   }
 
-  function makeDrum(lane) {
-    const rate = offline().sampleRate
-    const seconds = { kick: 0.3, snare: 0.19, hat: 0.085, tom: 0.28 }[lane]
-    const buffer = offline().createBuffer(1, Math.ceil(seconds * rate), rate)
-    const samples = buffer.getChannelData(0)
-    let phase = 0,
-      prev = 0
-    for (let i = 0; i < samples.length; i++) {
-      const t = i / rate,
-        white = 2 * Math.random() - 1
-      if (lane === 'kick' || lane === 'tom') {
-        const freq = lane === 'kick' ? 46 + 160 * Math.exp(-t * 40) : 118 + 92 * Math.exp(-t * 17)
-        phase += (freq * 2 * Math.PI) / rate
-        samples[i] = (Math.sin(phase) + 0.12 * Math.sin(phase * 2.02)) * Math.exp(-t * 17)
-      } else if (lane === 'snare') {
-        samples[i] =
-          (0.55 * (white - prev * 0.7) + 0.32 * Math.sin(2 * Math.PI * 181 * t)) * Math.exp(-t * 29)
-      } else {
-        samples[i] = 0.38 * (white - prev) * Math.exp(-t * 68)
-      }
-      prev = white
-      samples[i] *= Math.min(1, i / (rate * 0.0009), (samples.length - i) / (rate * 0.007))
-    }
-    return buffer
-  }
   function prepareSound() {
     if (!audio) {
       if (!contextConstructor) return Promise.reject(new Error('Web Audio unavailable'))
@@ -76,11 +79,13 @@
       master = audio.createGain()
       master.gain.value = 0.78
       master.connect(audio.destination)
+      effectsBus = audio.createGain()
+      effectsBus.connect(master)
     }
     if (audio.state === 'suspended' || audio.state === 'interrupted') return audio.resume()
     return Promise.resolve()
   }
-  function play(buffer, level, at, bus, grouped = false, rate = 1) {
+  function play(buffer, level, at, bus, group, rate = 1) {
     if (!audio || !bus || !buffer) return
     const src = audio.createBufferSource(),
       gain = audio.createGain()
@@ -88,70 +93,100 @@
     src.playbackRate.value = rate
     gain.gain.value = level
     src.connect(gain).connect(bus)
-    if (grouped) scheduled.add(src)
+    group?.add(src)
     src.onended = () => {
-      scheduled.delete(src)
+      group?.delete(src)
       gain.disconnect()
     }
     src.start(at)
   }
   function drums(lane, velocity, at = audio?.currentTime, bus = master, grouped = false) {
-    play(kit.get(lane), Math.min(1, Math.max(0.12, velocity / 127)) * 0.68, at, bus, grouped)
+    play(clips.get('kit_' + lane), Math.min(1, Math.max(0.12, velocity / 127)) * 0.68, at, bus, grouped ? scheduled : null)
   }
 
-  function stop() {
+  function stop(leaveImpacts = false) {
     generation++
     for (const src of scheduled) src.stop()
     scheduled.clear()
+    for (const src of activeVoices) src.stop()
+    activeVoices.clear()
+    if (!leaveImpacts) {
+      for (const src of activeImpacts) src.stop()
+      activeImpacts.clear()
+    }
     sceneBus?.disconnect()
     sceneBus = undefined
     musicBus?.disconnect()
     musicBus = undefined
+    songStart = null
+    crewEnd = -Infinity
+    lastEffect.clear()
+    nextVariant.clear()
   }
   function click(at, accent) {
-    const osc = audio.createOscillator(),
-      g = audio.createGain()
-    osc.type = 'triangle'
-    osc.frequency.setValueAtTime(accent ? 1330 : 910, at)
-    g.gain.setValueAtTime(0.26, at)
-    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.055)
-    osc.connect(g).connect(sceneBus)
-    scheduled.add(osc)
-    osc.onended = () => {
-      scheduled.delete(osc)
-      g.disconnect()
-    }
-    osc.start(at)
-    osc.stop(at + 0.057)
+    play(clips.get('kit_click'), accent ? 0.60 : 0.40, at, sceneBus, scheduled)
   }
   function impact(kind, strength = 1) {
-    const buffer = clips.get(kind === 'win' ? 'victory' : kind === 'lose' ? 'defeat' : kind)
-    if (!audio || !buffer) return
+    if (!audio || !impactProfile) return
     const at = audio.currentTime
     const ending = kind === 'win' || kind === 'lose'
-    if (musicBus && !ending && kind !== 'hit') {
-      const mix = musicBus.gain
-      if (typeof mix.cancelAndHoldAtTime === 'function') mix.cancelAndHoldAtTime(at)
-      else {
-        const current = mix.value
-        mix.cancelScheduledValues(at)
-        mix.setValueAtTime(current, at)
-      }
-      mix.linearRampToValueAtTime(0.42, at + 0.009)
-      mix.linearRampToValueAtTime(0.77, at + 0.18)
+    let name = kind === 'win' ? 'victory' : kind === 'lose' ? 'defeat' : kind
+    const variants = impactProfile.variants[kind]
+    if (variants) {
+      const next = nextVariant.get(kind) || 0
+      if (at - (lastEffect.get(kind) ?? -Infinity) < impactProfile.cooldown_ms[kind] / 1000) return
+      lastEffect.set(kind, at)
+      nextVariant.set(kind, (next + 1) % variants.length)
+      name = variants[next]
     }
-    const gain = ending ? 0.78 : kind === 'hit' ? 0.36 : 0.64
-    play(buffer, gain * Math.min(1.1, Math.max(0.45, strength)), at, master, true)
+    const buffer = clips.get(name)
+    if (!buffer) return
+    const speech = !ending && (at < crewEnd || speechIsNear(at) || speechIsNear(at + 0.179))
+    if (musicBus && !speech && impactProfile.ducked.includes(kind)) duckMusic(at)
+    const gain = impactProfile.levels[kind] * (speech ? 0.58 : 1)
+    play(buffer, gain * Math.min(1.1, Math.max(0.45, strength)), at, effectsBus, activeImpacts)
+  }
+  function voice(name) {
+    const clip = clips.get('voice_' + name)
+    if (!audio || !clip || audio.currentTime < crewEnd) return
+    const at = audio.currentTime
+    crewEnd = at + clip.duration
+    if (musicBus) duckMusic(at, clip.duration)
+    play(clip, 0.79, at, effectsBus, activeVoices)
+  }
+  function speechIsNear(at) {
+    if (songStart === null) return false
+    const seconds = at - songStart
+    return impactProfile.speech_beats.some((beat) => {
+      const entrance = beat * songBeat
+      return seconds >= entrance - impactProfile.speech_lead &&
+        seconds < entrance + impactProfile.speech_seconds
+    })
+  }
+  function duckMusic(at, voiceDuration = 0) {
+    const level = musicBus.gain
+    if (typeof level.cancelAndHoldAtTime === 'function') level.cancelAndHoldAtTime(at)
+    else {
+      const current = level.value
+      level.cancelScheduledValues(at)
+      level.setValueAtTime(current, at)
+    }
+    const floor = voiceDuration ? 0.43 : 0.60
+    const sustain = Math.max(0.064, voiceDuration)
+    level.linearRampToValueAtTime(floor, at + 0.018)
+    level.setValueAtTime(floor, at + sustain)
+    level.linearRampToValueAtTime(0.77, at + sustain + 0.115)
   }
 
-  async function start(beatMs, cuesJson) {
+  async function start(beatMs, cuesJson, course = 0) {
     stop()
     const run = generation
     try {
       await prepareSound()
-      await Promise.all(decoding.values())
+      const family = ['battle', 'battle_space', 'battle_space', 'battle_shuffle'][course]
+      const suffix = Math.round(60000 / beatMs) === 72 ? '_slow' : ''
+      const [track] = await Promise.all([scoreFor(family + suffix), ...decoding.values()])
       if (generation !== run) return
-      const track = clips.get(Math.round(60000 / beatMs) === 72 ? 'battle_slow' : 'battle')
       if (!track || audio.state !== 'running') throw new Error('Battle audio unavailable')
       sceneBus = audio.createGain()
       sceneBus.connect(master)
@@ -161,8 +196,17 @@
       const beat = beatMs / 1000,
         countAt = audio.currentTime + 0.12,
         first = countAt + 4 * beat
+      songStart = first
+      songBeat = beat
       for (let i = 0; i < 4; i++) click(countAt + i * beat, i === 0)
-      play(track, 1, first, musicBus, true)
+      play(track, 1, first, musicBus, scheduled)
+      if (impactProfile) {
+        for (const [kind, position, offset] of impactProfile.timeline) {
+          const at = first + position * beat + offset
+          const gain = impactProfile.levels[kind] * (speechIsNear(at) ? 0.58 : 1)
+          play(clips.get(kind), gain, at, effectsBus, scheduled)
+        }
+      }
       for (const [position, lane, velocity = 108] of JSON.parse(cuesJson)) {
         drums(lane, velocity, first + position * beat, sceneBus, true)
       }
@@ -243,6 +287,8 @@
       const index = Math.floor((x - 36) / 272)
       if ((x - 36) % 272 >= 264 || !padLanes[index]) return
       strike(padLanes[index], e)
+    } else if (x >= 273 && x <= 503 && y >= 367 && y <= 423) {
+      send('course')
     } else if (y >= 40 && y <= 90 && x >= 512 && x <= 1116) {
       if (x <= 684) send('tempo')
       else if (x >= 700 && x <= 919) void connectMidi()
@@ -252,7 +298,6 @@
   }
   function bind(callback) {
     send = callback
-    for (const lane of padLanes) kit.set(lane, makeDrum(lane))
     const canvas = document.getElementById('canvas') || document.querySelector('canvas')
     canvas.addEventListener('pointerdown', (e) => trigger(canvas, e))
     // Use a real link so touch browsers and assistive technology can open the score.
@@ -261,16 +306,16 @@
     guideLink.target = '_blank'
     guideLink.rel = 'noopener'
     guideLink.hidden = true
-    guideLink.setAttribute('aria-label', '查看七张架子鼓练习谱')
-    Object.assign(guideLink.style, {position: 'fixed', zIndex: '4', borderRadius: '8px'})
+    guideLink.setAttribute('aria-label', '查看架子鼓练习谱')
+    Object.assign(guideLink.style, { position: 'fixed', zIndex: '4', borderRadius: '8px' })
     const positionGuide = () => {
       const rect = canvas.getBoundingClientRect()
       const fit = Math.min(rect.width / WIDTH, rect.height / HEIGHT)
       Object.assign(guideLink.style, {
-        left: (rect.left + (rect.width - WIDTH * fit) / 2 + 56 * fit) + 'px',
-        top: (rect.top + (rect.height - HEIGHT * fit) / 2 + 367 * fit) + 'px',
-        width: (205 * fit) + 'px',
-        height: (56 * fit) + 'px',
+        left: rect.left + (rect.width - WIDTH * fit) / 2 + 56 * fit + 'px',
+        top: rect.top + (rect.height - HEIGHT * fit) / 2 + 367 * fit + 'px',
+        width: 205 * fit + 'px',
+        height: 56 * fit + 'px',
       })
     }
     document.body.append(guideLink)
@@ -282,6 +327,7 @@
       if (keys[e.code]) strike(keys[e.code], e)
       else if (e.code === 'KeyM') void connectMidi()
       else if (e.code === 'KeyB') send('tempo')
+      else if (e.code === 'KeyL') send('course')
       else if (e.code === 'Space') send('action')
       else return
       e.preventDefault()
@@ -297,11 +343,17 @@
     bind,
     setClip,
     setPcm,
-    setGuideVisible: (show) => { guideLink.hidden = !show },
-    setMidiRoutes: (json) => { midiRoutes = JSON.parse(json) },
+    configureImpacts: (json) => { impactProfile = JSON.parse(json) },
+    setGuideVisible: (show) => {
+      guideLink.hidden = !show
+    },
+    setMidiRoutes: (json) => {
+      midiRoutes = JSON.parse(json)
+    },
     start,
     stop,
     impact,
+    voice,
     now: () => performance.now(),
   }
 })()

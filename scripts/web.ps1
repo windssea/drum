@@ -28,6 +28,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Godot Web export failed' }
     $fontLicense = [IO.File]::ReadAllText((Join-Path $project 'art/OFL-NotoSansSC.txt'))
     $credits = "Godot Engine · MIT and third-party notices: https://godotengine.org/license/" + [Environment]::NewLine + [Environment]::NewLine + $fontLicense
+    $credits += [Environment]::NewLine + "Original AI-generated soundtrack and performances: Google Lyria / Gemini. Production notes: https://github.com/windssea/drum/blob/main/docs/music-score.md"
     [IO.File]::WriteAllText((Join-Path $export 'index.credits.txt'), $credits)
     $htmlFile = Join-Path $export 'index.html'
     $html = [IO.File]::ReadAllText($htmlFile).Replace('<html lang="en">', '<html lang="zh-CN">')
@@ -37,6 +38,7 @@ try {
     [IO.File]::WriteAllText($htmlFile, $html)
     Copy-Item -LiteralPath (Join-Path $repo 'infra/loading.css') -Destination (Join-Path $export 'index.loading.css')
     Copy-Item -LiteralPath (Join-Path $repo 'infra/splash.webp') -Destination (Join-Path $export 'index.cover.webp')
+    Copy-Item -LiteralPath (Join-Path $project 'music/battle.ogg') -Destination (Join-Path $export 'index.theme.ogg')
     $practice = Join-Path $export 'practice/index.html'
     & node (Join-Path $PSScriptRoot 'build-practice-page.mjs') $practice
     if ($LASTEXITCODE -ne 0) { throw 'Practice guide generation failed' }
