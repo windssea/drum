@@ -21,6 +21,9 @@ try {
     Clear-GeneratedExport $export
     & $Godot --headless --path $project --import
     if ($LASTEXITCODE -ne 0) { throw 'Godot import failed' }
+    $invalid = Get-ChildItem -Path $project -Filter '*.import' -File -Recurse |
+        Select-String -Pattern '^valid=false$' | Select-Object -First 1
+    if ($invalid) { throw "Invalid Godot import: $($invalid.Path)" }
     & $Godot --headless --path $project --export-release Web (Join-Path $export 'index.html')
     if ($LASTEXITCODE -ne 0) { throw 'Godot Web export failed' }
     $fontLicense = [IO.File]::ReadAllText((Join-Path $project 'art/OFL-NotoSansSC.txt'))
@@ -34,6 +37,9 @@ try {
     [IO.File]::WriteAllText($htmlFile, $html)
     Copy-Item -LiteralPath (Join-Path $repo 'infra/loading.css') -Destination (Join-Path $export 'index.loading.css')
     Copy-Item -LiteralPath (Join-Path $repo 'infra/splash.webp') -Destination (Join-Path $export 'index.cover.webp')
+    $practice = Join-Path $export 'practice/index.html'
+    & node (Join-Path $PSScriptRoot 'build-practice-page.mjs') $practice
+    if ($LASTEXITCODE -ne 0) { throw 'Practice guide generation failed' }
     Write-Host "Local export: $export"
     if (!$Publish) { return }
 
@@ -56,6 +62,9 @@ try {
     Get-ChildItem -LiteralPath $export -File -Filter 'index.*' |
         Where-Object { $_.Name -ne 'index.wasm' } |
         Copy-Item -Destination $site
+    $sitePractice = Join-Path $site 'practice/index.html'
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($sitePractice)) | Out-Null
+    Copy-Item -LiteralPath $practice -Destination $sitePractice
     $bucket = $config.r2_buckets[0].bucket_name
     & npx --yes --registry=https://registry.npmjs.org wrangler@4.168.0 r2 object put "$bucket/engine/$sha.wasm.gz" --file $gzipPath --content-type application/gzip --remote
     if ($LASTEXITCODE -ne 0) { throw 'R2 upload failed' }

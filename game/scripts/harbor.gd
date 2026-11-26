@@ -1,73 +1,117 @@
 extends Node2D
 
-const BEAT_MS := 60000.0 / 84.0
-const HIT_MS := 110.0
-const PERFECT_MS := 42.0
-const KICK := "kick"
-const SNARE := "snare"
-const CUES := [[1, SNARE], [3, SNARE], [8, KICK], [9, SNARE], [10, KICK], [11, SNARE]]
-const ANSWERS := [[5, SNARE], [7, SNARE], [12, KICK], [13, SNARE], [14, KICK], [15, SNARE]]
-const KICK_PAD := Rect2(36, 544, 532, 122)
-const SNARE_PAD := Rect2(584, 544, 532, 122)
+const Orders = preload("res://scripts/combat_orders.gd")
+const BEAT_MS := Orders.BEAT_MS
+const KICK := Orders.KICK
+const SNARE := Orders.SNARE
+const HAT := Orders.HAT
+const TOM := Orders.TOM
+const LANE_PADS := {
+	KICK: Rect2(36, 605, 264, 77),
+	SNARE: Rect2(308, 605, 264, 77),
+	HAT: Rect2(580, 605, 264, 77),
+	TOM: Rect2(852, 605, 264, 77),
+}
 const MIDI_BUTTON := Rect2(700, 40, 219, 50)
+const SPEED_BUTTON := Rect2(512, 40, 172, 50)
 const ACTION_BUTTON := Rect2(935, 40, 181, 50)
-const ART := Rect2(36, 114, 1080, 407)
-const STATUS := Rect2(443, 132, 285, 169)
+const GUIDE_BUTTON := Rect2(56, 367, 205, 56)
+const ART := Rect2(36, 108, 1080, 334)
+const STATUS := Rect2(408, 125, 318, 136)
+const GRID := Rect2(36, 452, 1080, 142)
 const GOLD := Color("#ffd98f")
 const IVORY := Color("#fff4dc")
 const MUTED := Color("#adbcc5")
 const BLUE := Color("#92dbe0")
 const SALMON := Color("#ffaea0")
 const INK := Color("#121922")
+const LANE_COLORS := {KICK: GOLD, SNARE: BLUE, HAT: Color("#b7e88b"), TOM: Color("#d1b4ff")}
+const LANE_NAMES := {KICK: "底鼓", SNARE: "军鼓", HAT: "踩镲", TOM: "通鼓"}
+const LANE_GLYPHS := {KICK: "底", SNARE: "军", HAT: "镲", TOM: "通"}
+const LANE_KEYS := {KICK: "D", SNARE: "F", HAT: "J", TOM: "K"}
 const BACKDROP := "res://art/harbor.webp"
 const BOSS_ART := "res://art/boss.webp"
+const BOSS_BURST := "res://art/vfx/boss-burst.webp"
+const VICTORY_FILM := "res://art/vfx/finale.webp"
+const VICTORY_MS := 1850.0
 
 enum Phase { IDLE, STARTING, PLAYING, DONE }
-enum NoteState { OPEN, HIT, MISSED }
 
 var phase: Phase = Phase.IDLE
+var tempo := Orders.BPM
+var beat_ms := BEAT_MS
+var bar_ms := Orders.BAR_MS
 var now_ms := 0.0
 var anchor_ms := 0.0
 var damage := 0
-var hull := 3
+var hull := Orders.SHIP_HULL
+var shield := 0
 var perfect := 0
 var missed := 0
 var extras := 0
-var latest := -999.0
+var attacks_landed := 0
+var counters := 0
+var timing_offsets := PackedFloat64Array()
+var counted_by_lane: Dictionary[String, int] = {}
+var missed_by_lane: Dictionary[String, int] = {}
+var coaching := ""
+var next_bar_to_settle := 0
+var latest := -100000.0
 var feedback := ""
 var feedback_color := GOLD
 var midi := "idle"
+var midi_readout := ""
+var guide_link_visible := false
 var error_text := ""
-var pad_hits: Dictionary[String, float] = {KICK: -999.0, SNARE: -999.0}
-var note_state: Array[int] = []
+var pad_hits: Dictionary[String, float] = {}
+var attack_orders: Array[Array] = []
+var guard_orders: Array[Orders.Attempt] = []
+var cue_chart: Array = Orders.cues()
 var art: Texture2D
 var boss: Texture2D
+var burst_atlas: Texture2D
+var victory_atlas: Texture2D
 var font: Font
 var browser: JavaScriptObject
 var browser_events: JavaScriptObject
 var native_song: AudioStreamPlayer
 var native_kit: AudioStreamPlayer
-var kick_sample: AudioStreamWAV
-var snare_sample: AudioStreamWAV
-var launch_ms := -999.0
-var recoil_ms := -999.0
-var launch_lane := KICK
-var finished_ms := -999.0
+var native_stinger: AudioStreamPlayer
+var native_tracks: Dictionary[int, AudioStream] = {}
+var native_samples: Dictionary[String, AudioStreamWAV] = {}
+var native_effects: Dictionary[String, AudioStream] = {}
+var effects: Array[Dictionary] = []
+var recoil_ms := -100000.0
+var break_ms := -100000.0
+var guard_ms := -100000.0
+var finished_ms := -100000.0
+var won := false
+var panel_styles: Dictionary[String, StyleBoxFlat] = {}
 
 
 func _ready() -> void:
+	for lane in Orders.LANES:
+		pad_hits[lane] = -100000.0
 	now_ms = _clock()
 	font = preload("res://art/HarborHUD.ttf")
 	if ResourceLoader.exists(BACKDROP, "Texture2D"):
 		art = load(BACKDROP) as Texture2D
 	if ResourceLoader.exists(BOSS_ART, "Texture2D"):
 		boss = load(BOSS_ART) as Texture2D
+	if ResourceLoader.exists(BOSS_BURST, "Texture2D"):
+		burst_atlas = load(BOSS_BURST) as Texture2D
+	if ResourceLoader.exists(VICTORY_FILM, "Texture2D"):
+		victory_atlas = load(VICTORY_FILM) as Texture2D
 	if OS.has_feature("web"):
 		JavaScriptBridge.eval(FileAccess.get_file_as_string("res://web/harbor_bridge.js"), true)
 		browser = JavaScriptBridge.get_interface("harborBridge")
 		if browser:
 			browser_events = JavaScriptBridge.create_callback(_browser_event)
 			browser.bind(browser_events)
+			browser.setMidiRoutes(JSON.stringify(Orders.midi_routes()))
+			var music_script := "res://scripts/web_music.gd"
+			if ResourceLoader.exists(music_script):
+				load(music_script).install(browser)
 	elif DisplayServer.get_name() != "headless":
 		_setup_native_audio()
 	queue_redraw()
@@ -82,11 +126,9 @@ func _clock() -> float:
 func _process(_delta: float) -> void:
 	now_ms = _clock()
 	if phase == Phase.PLAYING:
-		_expire_notes(now_ms)
-		if phase == Phase.PLAYING and now_ms - anchor_ms >= 16.0 * BEAT_MS + HIT_MS:
-			_finish()
+		_settle_at(now_ms)
 		queue_redraw()
-	elif phase == Phase.STARTING or now_ms - maxf(latest, finished_ms) < 960.0:
+	elif phase == Phase.STARTING or now_ms - maxf(latest, finished_ms) < VICTORY_MS + 100.0:
 		queue_redraw()
 
 
@@ -95,20 +137,20 @@ func _input(event: InputEvent) -> void:
 		return
 	var position: Vector2
 	if event is InputEventKey:
-		if not event.pressed or event.echo:
+		if not event.pressed or event.echo or event.ctrl_pressed or event.meta_pressed or event.alt_pressed:
 			return
 		match event.physical_keycode:
 			KEY_D: _native_strike(KICK)
 			KEY_F: _native_strike(SNARE)
+			KEY_J: _native_strike(HAT)
+			KEY_K: _native_strike(TOM)
 			KEY_M: _connect_native_midi()
+			KEY_B: _toggle_tempo()
 			KEY_SPACE: _action()
 		return
 	if event is InputEventMIDI:
 		if event.message == MIDI_MESSAGE_NOTE_ON and event.velocity > 0:
-			if event.pitch in [35, 36]:
-				_strike(KICK, _clock())
-			elif event.pitch in [37, 38, 40]:
-				_strike(SNARE, _clock())
+			_midi_strike(event.pitch, _clock())
 		return
 	if event is InputEventScreenTouch and event.pressed:
 		position = event.position
@@ -116,25 +158,36 @@ func _input(event: InputEvent) -> void:
 		position = event.position
 	else:
 		return
-	if KICK_PAD.has_point(position):
-		_native_strike(KICK)
-	elif SNARE_PAD.has_point(position):
-		_native_strike(SNARE)
-	elif MIDI_BUTTON.has_point(position):
+	for lane: String in Orders.LANES:
+		if LANE_PADS[lane].has_point(position):
+			_native_strike(lane)
+			return
+	if MIDI_BUTTON.has_point(position):
 		_connect_native_midi()
 	elif ACTION_BUTTON.has_point(position):
 		_action()
+	elif SPEED_BUTTON.has_point(position):
+		_toggle_tempo()
+	elif GUIDE_BUTTON.has_point(position) and _guide_visible():
+		OS.shell_open("https://drum-lab.windssea526.workers.dev/practice/")
 
 
 func _browser_event(args: Array) -> void:
 	match String(args[0]):
-		"hit": _strike(String(args[1]), float(args[2]))
+		"hit":
+			if args.size() >= 5:
+				_midi_strike(int(args[4]), float(args[2]))
+			else:
+				_strike(String(args[1]), float(args[2]))
 		"action": _action()
+		"tempo": _toggle_tempo()
 		"round": _begin(float(args[1]))
 		"midi":
 			midi = String(args[1])
 			queue_redraw()
-		"interrupted": _reset()
+		"interrupted":
+			if phase == Phase.STARTING or phase == Phase.PLAYING:
+				_reset()
 		"audio_unavailable":
 			phase = Phase.IDLE
 			error_text = "音频未就绪，请再次开始。"
@@ -146,18 +199,42 @@ func _reset() -> void:
 		browser.stop()
 	elif native_song:
 		native_song.stop()
+		native_stinger.stop()
 	phase = Phase.IDLE
 	error_text = ""
 	damage = 0
-	hull = 3
+	hull = Orders.SHIP_HULL
+	shield = 0
 	perfect = 0
 	missed = 0
 	extras = 0
-	latest = -999.0
-	launch_ms = -999.0
-	recoil_ms = -999.0
-	finished_ms = -999.0
+	attacks_landed = 0
+	counters = 0
+	timing_offsets.clear()
+	counted_by_lane.clear()
+	missed_by_lane.clear()
+	coaching = ""
+	next_bar_to_settle = 0
+	latest = -100000.0
+	recoil_ms = -100000.0
+	break_ms = -100000.0
+	guard_ms = -100000.0
+	finished_ms = -100000.0
 	feedback = ""
+	feedback_color = GOLD
+	won = false
+	effects.clear()
+	for lane in Orders.LANES:
+		pad_hits[lane] = -100000.0
+	queue_redraw()
+
+
+func _toggle_tempo() -> void:
+	if phase == Phase.PLAYING or phase == Phase.STARTING:
+		return
+	tempo = Orders.PRACTICE_BPM if tempo == Orders.BPM else Orders.BPM
+	beat_ms = 60000.0 / tempo
+	bar_ms = beat_ms * 4.0
 	queue_redraw()
 
 
@@ -168,12 +245,13 @@ func _action() -> void:
 	_reset()
 	phase = Phase.STARTING
 	if browser:
-		browser.start(BEAT_MS, JSON.stringify(CUES))
+		browser.start(beat_ms, JSON.stringify(cue_chart))
 	elif not OS.has_feature("web"):
 		if native_song:
+			native_song.stream = _native_track(tempo)
 			native_song.play()
 		var latency_ms := (AudioServer.get_time_to_next_mix() + AudioServer.get_output_latency()) * 1000.0
-		_begin(_clock() + latency_ms + 4.0 * BEAT_MS)
+		_begin(_clock() + latency_ms + bar_ms)
 	else:
 		phase = Phase.IDLE
 		error_text = "浏览器音频无法启动。"
@@ -182,73 +260,218 @@ func _action() -> void:
 
 func _begin(start_ms: float) -> void:
 	anchor_ms = start_ms
-	note_state.assign([NoteState.OPEN, NoteState.OPEN, NoteState.OPEN, NoteState.OPEN, NoteState.OPEN, NoteState.OPEN])
+	attack_orders.clear()
+	guard_orders.clear()
+	for cycle in range(4):
+		var group: Array[Orders.Attempt] = []
+		for chart in Orders.ATTACKS:
+			group.append(Orders.Attempt.new(chart, beat_ms))
+		attack_orders.append(group)
+		guard_orders.append(Orders.Attempt.new(Orders.GUARDS[cycle], beat_ms))
 	phase = Phase.PLAYING
 	queue_redraw()
 
 
-func _expire_notes(at_ms: float) -> void:
-	for index in range(ANSWERS.size()):
-		var target_ms := anchor_ms + float(ANSWERS[index][0]) * BEAT_MS
-		# Keep a short grace interval for queued browser callbacks. A callback
-		# still must carry a timestamp inside the actual hit window.
-		if note_state[index] == NoteState.OPEN and at_ms > target_ms + HIT_MS + 24.0:
-			note_state[index] = NoteState.MISSED
-			missed += 1
-			_retaliate("漏击")
-			if phase != Phase.PLAYING:
-				return
+func _settle_at(at_ms: float) -> void:
+	while phase == Phase.PLAYING and next_bar_to_settle < Orders.BAR_COUNT:
+		var bar := next_bar_to_settle
+		var deadline := anchor_ms + (bar + 1) * bar_ms + Orders.CALLBACK_GRACE_MS
+		if at_ms < deadline:
+			return
+		next_bar_to_settle += 1
+		var cycle := bar >> 2
+		match bar % 4:
+			Orders.Bar.ATTACK: _resolve_attack(cycle)
+			Orders.Bar.GUARD: _resolve_guard(cycle)
+	if phase == Phase.PLAYING and next_bar_to_settle >= Orders.BAR_COUNT:
+		_finish(damage == Orders.BOSS_ARMOR)
 
 
 func _strike(lane: String, input_ms: float) -> void:
-	if not pad_hits.has(lane):
+	if not Orders.LANES.has(lane):
 		return
 	pad_hits[lane] = _clock()
-	if phase != Phase.PLAYING or damage == ANSWERS.size():
+	if phase != Phase.PLAYING:
 		latest = pad_hits[lane]
 		queue_redraw()
 		return
-	var elapsed := (input_ms - anchor_ms) / BEAT_MS
-	var best := -1
-	var offset := INF
-	for index in range(ANSWERS.size()):
-		if ANSWERS[index][1] != lane or note_state[index] != NoteState.OPEN:
+	_judge_strike(lane, input_ms)
+
+
+func _midi_strike(note: int, input_ms: float) -> void:
+	var voice := Orders.midi_name(note)
+	if voice.is_empty():
+		return
+	midi_readout = "MIDI %d  ·  %s" % [note, voice]
+	var lane := Orders.midi_lane(note)
+	if not lane.is_empty():
+		_strike(lane, input_ms)
+	elif phase == Phase.PLAYING:
+		_judge_strike("", input_ms)
+	queue_redraw()
+
+
+func _judge_strike(lane: String, input_ms: float) -> void:
+	var elapsed := input_ms - anchor_ms
+	var normal_bar := floori(elapsed / bar_ms)
+	var chosen_bar := normal_bar
+	var relative := elapsed - normal_bar * bar_ms
+	if relative >= bar_ms - Orders.HIT_MS and normal_bar % 4 in [0, 2]:
+		chosen_bar += 1
+		relative -= bar_ms
+	if chosen_bar < next_bar_to_settle or chosen_bar < 0 or chosen_bar >= Orders.BAR_COUNT:
+		return
+	var cycle := chosen_bar >> 2
+	var active_bar := chosen_bar % 4
+	if active_bar == Orders.Bar.ATTACK:
+		_play_order(lane, relative, attack_orders[cycle], false)
+	elif active_bar == Orders.Bar.GUARD:
+		_play_order(lane, relative, [guard_orders[cycle]], true)
+
+
+func _play_order(lane: String, relative: float, attempts: Array, defense: bool) -> void:
+	var best := INF
+	for attempt: Orders.Attempt in attempts:
+		var offset := attempt.accept(lane, relative)
+		if absf(offset) < absf(best):
+			best = offset
+		if is_inf(offset) and relative >= 0.0:
+			attempt.extras += 1
+	if is_inf(best):
+		if relative >= 0.0:
+			_react("谱外鼓位" if lane.is_empty() else "空拍多击", SALMON)
+		return
+	var precise := absf(best) <= Orders.PERFECT_MS
+	var label := "精准" if precise else "命中"
+	var offset_label := "  /  %d ms %s" % [absi(roundi(best)), "偏早" if best < 0.0 else "偏晚"]
+	if defense:
+		guard_ms = _clock()
+		_impact("guard", 1.0 if precise else 0.68)
+		_react("格挡 " + label + offset_label, BLUE)
+	else:
+		_push_effect("hit", lane, 1.0 if precise else 0.65)
+		_impact("hit", 1.0 if precise else 0.68)
+		_react("出招 " + label + offset_label, GOLD)
+
+
+func _resolve_attack(cycle: int) -> void:
+	var group := attack_orders[cycle]
+	for index in range(group.size()):
+		var attempt: Orders.Attempt = group[index]
+		if not attempt.complete():
 			continue
-		var apart := input_ms - anchor_ms - float(ANSWERS[index][0]) * BEAT_MS
-		if absf(apart) <= HIT_MS and absf(apart) < absf(offset):
-			best = index
-			offset = apart
-	if best >= 0:
-		note_state[best] = NoteState.HIT
-		damage += 1
-		launch_ms = _clock()
-		launch_lane = lane
-		if absf(offset) <= PERFECT_MS:
-			perfect += 1
-		var grade := "精准破甲" if absf(offset) <= PERFECT_MS else "破甲"
-		var shift := "  /  %d ms %s" % [absi(roundi(offset)), "偏早" if offset < 0.0 else "偏晚"]
-		_react(grade + (shift if absf(offset) >= 1.0 else ""), GOLD)
-	elif (elapsed >= 4.0 and elapsed < 8.0) or (elapsed >= 12.0 and elapsed < 16.0):
-		extras += 1
-		_retaliate("空拍多击")
+		_count_attempt(attempt)
+		var strong := attempt.perfect == attempt.notes.size()
+		var recommended: bool = index == Orders.RECOMMENDED[cycle]
+		var amount := 4 + int(strong) + 2 * int(recommended)
+		damage = mini(Orders.BOSS_ARMOR, damage + amount)
+		attacks_landed += 1
+		var kind: String = Orders.ATTACK_KINDS[index]
+		var reward := ""
+		if kind == "flurry" and hull < Orders.SHIP_HULL:
+			hull += 1
+			reward = "  ·  修船 +1"
+		elif kind == "break":
+			shield = 1
+			reward = "  ·  护盾"
+		break_ms = _clock()
+		_push_effect(kind, KICK, 1.0 if strong else 0.75)
+		_impact(kind, 1.0 if strong else 0.78)
+		_react(("%s成招  ·  破甲 %d" % [Orders.ATTACK_NAMES[index], amount]) + reward, GOLD)
+		return
+	var plausible: Orders.Attempt
+	for attempt: Orders.Attempt in group:
+		if not plausible:
+			plausible = attempt
+		elif attempt.hits > plausible.hits or (attempt.hits == plausible.hits and attempt.extras < plausible.extras):
+			plausible = attempt
+	_count_attempt(plausible)
+	_react("出招未完成", SALMON)
 
 
-func _retaliate(message: String) -> void:
-	hull = maxi(0, hull - 1)
+func _resolve_guard(cycle: int) -> void:
+	var order := guard_orders[cycle]
+	_count_attempt(order)
+	if order.complete():
+		counters += 1
+		var repairs := hull < Orders.SHIP_HULL
+		hull = mini(Orders.SHIP_HULL, hull + 1)
+		damage = mini(Orders.BOSS_ARMOR, damage + 2)
+		_push_effect("counter", HAT, 1.0)
+		_impact("counter")
+		_react("反击成功  ·  船体回复" if repairs else "反击成功  ·  破甲 2", BLUE)
+		return
+	var missing := order.notes.size() - order.hits
+	var penalty := mini(3, missing + order.extras)
+	var absorbed := mini(shield, penalty)
+	shield -= absorbed
+	penalty -= absorbed
+	hull = maxi(0, hull - penalty)
+	if penalty == 0:
+		guard_ms = _clock()
+		_impact("guard", 0.9)
+		_react("护盾挡住了反击", BLUE)
+		return
 	recoil_ms = _clock()
-	_react(message + " · 船体受损", SALMON)
+	_impact("hurt", 0.48 + penalty * 0.17)
+	_react("防守失误  ·  船体 -%d" % penalty, SALMON)
 	if hull == 0:
-		_finish()
+		_finish(false)
 
 
-func _finish() -> void:
+func _finish(victory: bool) -> void:
 	phase = Phase.DONE
+	won = victory
+	coaching = _coach()
 	finished_ms = _clock()
 	if browser:
 		browser.stop()
 	elif native_song:
 		native_song.stop()
+	_impact("win" if won else "lose")
 	queue_redraw()
+
+
+func _count_attempt(attempt: Orders.Attempt) -> void:
+	perfect += attempt.perfect
+	extras += attempt.extras
+	for index in range(attempt.notes.size()):
+		var note: Array = attempt.notes[index]
+		var lane := String(note[1])
+		counted_by_lane[lane] = counted_by_lane.get(lane, 0) + 1
+		if attempt.filled(index):
+			timing_offsets.append(attempt.timestamps[index] - float(note[0]) * attempt.step_ms)
+		else:
+			missed += 1
+			missed_by_lane[lane] = missed_by_lane.get(lane, 0) + 1
+
+
+func _coach() -> String:
+	if timing_offsets.is_empty():
+		return "建议切到 72 BPM，先跟练示范。"
+	timing_offsets.sort()
+	var middle := timing_offsets.size() >> 1
+	var median := timing_offsets[middle]
+	if timing_offsets.size() % 2 == 0:
+		median = (median + timing_offsets[middle - 1]) * 0.5
+	var timing := "中位差 %d ms" % absi(roundi(median))
+	if absf(median) >= 5.0:
+		timing = "中位偏%s %d ms" % ["早" if median < 0.0 else "晚", absi(roundi(median))]
+	var lowest := ""
+	var highest_rate := 0.0
+	for lane: String in Orders.LANES:
+		var lane_misses := int(missed_by_lane.get(lane, 0))
+		if lane_misses == 0:
+			continue
+		var rate := float(lane_misses) / counted_by_lane[lane]
+		if rate > highest_rate:
+			highest_rate = rate
+			lowest = lane
+	if not lowest.is_empty():
+		return timing + "  ·  先练%s" % LANE_NAMES[lowest]
+	if extras > 0:
+		return timing + "  ·  空拍留白"
+	return timing + "  ·  可换一种律动"
 
 
 func _react(message: String, color: Color) -> void:
@@ -258,26 +481,72 @@ func _react(message: String, color: Color) -> void:
 	queue_redraw()
 
 
+func _push_effect(kind: String, lane: String, strength: float) -> void:
+	if effects.size() >= 14:
+		effects.pop_front()
+	effects.append({"kind": kind, "lane": lane, "start": _clock(), "strength": strength})
+
+
+func _impact(kind: String, strength: float = 1.0) -> void:
+	if browser:
+		browser.impact(kind, strength)
+	elif native_effects.has(kind):
+		if kind in ["win", "lose"]:
+			native_stinger.stream = native_effects[kind]
+			native_stinger.play()
+		else:
+			var playback := native_kit.get_stream_playback() as AudioStreamPlaybackPolyphonic
+			if playback:
+				playback.play_stream(native_effects[kind], 0.0, linear_to_db(maxf(0.05, strength)))
+
+
 func _setup_native_audio() -> void:
-	kick_sample = _make_drum(true)
-	snare_sample = _make_drum(false)
+	for lane: String in Orders.LANES:
+		native_samples[lane] = _make_drum(lane)
+	for kind in ["hit", "power", "flurry", "break", "guard", "counter", "hurt"]:
+		var path := "res://audio/impact_%s.wav" % kind
+		if ResourceLoader.exists(path, "AudioStream"):
+			native_effects[kind] = load(path) as AudioStream
+	for kind in ["win", "lose"]:
+		var path := "res://music/%s.ogg" % ("victory" if kind == "win" else "defeat")
+		if FileAccess.file_exists(path):
+			native_effects[kind] = AudioStreamOggVorbis.load_from_file(path)
 	native_kit = AudioStreamPlayer.new()
 	var poly := AudioStreamPolyphonic.new()
-	poly.polyphony = 8
+	poly.polyphony = 16
 	native_kit.stream = poly
 	add_child(native_kit)
 	native_kit.play()
+	native_stinger = AudioStreamPlayer.new()
+	add_child(native_stinger)
 	native_song = AudioStreamPlayer.new()
-	native_song.stream = _make_track()
 	add_child(native_song)
+
+
+func _native_track(bpm: int) -> AudioStream:
+	if native_tracks.has(bpm):
+		return native_tracks[bpm]
+	var music := "res://music/battle_slow_native.ogg" if bpm == Orders.PRACTICE_BPM else "res://music/battle_native.ogg"
+	var has_score := ResourceLoader.exists(music, "AudioStream")
+	var cues := _make_track(not has_score, 60000.0 / bpm)
+	var result: AudioStream = cues
+	if has_score:
+		var synced := AudioStreamSynchronized.new()
+		synced.stream_count = 2
+		synced.set_sync_stream(0, load(music) as AudioStream)
+		synced.set_sync_stream(1, cues)
+		synced.set_sync_stream_volume(0, -2.0)
+		result = synced
+	native_tracks[bpm] = result
+	return result
 
 
 func _native_strike(lane: String) -> void:
 	var at := _clock()
 	if native_kit:
-		var kit_playback := native_kit.get_stream_playback() as AudioStreamPlaybackPolyphonic
-		if kit_playback:
-			kit_playback.play_stream(kick_sample if lane == KICK else snare_sample)
+		var playback := native_kit.get_stream_playback() as AudioStreamPlaybackPolyphonic
+		if playback:
+			playback.play_stream(native_samples[lane])
 	_strike(lane, at)
 
 
@@ -299,42 +568,47 @@ func _wav(samples: PackedFloat32Array, rate: int) -> AudioStreamWAV:
 	return stream
 
 
-func _drum_signal(is_kick: bool, t: float) -> float:
+func _drum_signal(lane: String, t: float) -> float:
 	var attack := minf(1.0, t / 0.002)
-	if is_kick:
-		return attack * 0.6 * sin(TAU * (44.0 * t + 3.1 * (1.0 - exp(-37.0 * t)))) * exp(-18.0 * t)
-	return attack * (0.42 * randf_range(-1.0, 1.0) + 0.17 * sin(TAU * 178.0 * t)) * exp(-29.0 * t)
+	match lane:
+		KICK: return attack * 0.61 * sin(TAU * (44.0 * t + 3.1 * (1.0 - exp(-37.0 * t)))) * exp(-18.0 * t)
+		SNARE: return attack * (0.42 * randf_range(-1.0, 1.0) + 0.17 * sin(TAU * 178.0 * t)) * exp(-29.0 * t)
+		HAT: return attack * 0.38 * randf_range(-1.0, 1.0) * sin(TAU * 6480.0 * t) * exp(-72.0 * t)
+		_: return attack * 0.49 * sin(TAU * (97.0 * t + 1.45 * (1.0 - exp(-63.0 * t)))) * exp(-18.0 * t)
 
 
-func _make_drum(is_kick: bool) -> AudioStreamWAV:
+func _make_drum(lane: String) -> AudioStreamWAV:
 	const RATE := 24000
 	var samples := PackedFloat32Array()
 	samples.resize(int(RATE * 0.27))
 	for index in range(samples.size()):
-		samples[index] = _drum_signal(is_kick, float(index) / RATE)
+		var t := float(index) / RATE
+		samples[index] = _drum_signal(lane, t) * minf(1.0, (samples.size() - index) / 144.0)
 	return _wav(samples, RATE)
 
 
-func _make_track() -> AudioStreamWAV:
+func _make_track(include_simple_groove: bool, tempo_beat_ms: float) -> AudioStreamWAV:
 	const RATE := 24000
 	var samples := PackedFloat32Array()
-	var step := BEAT_MS / 1000.0 * RATE
-	samples.resize(ceili(step * 20.0))
-	for beat in range(20):
-		var position := roundi(beat * step)
-		var frequency := 1050.0 if beat % 4 == 0 else 810.0
+	var beat_samples := tempo_beat_ms / 1000.0 * RATE
+	samples.resize(ceili(beat_samples * (4.0 + Orders.BAR_COUNT * 4.0)))
+	for beat in range(4):
+		var position := roundi(beat * beat_samples)
+		var frequency := 1180.0 if beat == 0 else 825.0
 		for sample in range(1200):
 			var t := float(sample) / RATE
-			samples[position + sample] += sin(TAU * frequency * t) * exp(-105.0 * t) * 0.19
-		if beat >= 4 and beat % 2 == 0:
-			var root := [98.0, 130.81, 82.41, 110.0][(beat - 4) >> 2] as float
+			samples[position + sample] += sin(TAU * frequency * t) * exp(-105.0 * t) * 0.23
+	if include_simple_groove:
+		for beat in range(4, 4 + Orders.BAR_COUNT * 4, 2):
+			var position := roundi(beat * beat_samples)
+			var root := float([98.0, 130.81, 82.41, 110.0][((beat - 4) >> 2) % 4])
 			for sample in range(8000):
 				var t := float(sample) / RATE
 				samples[position + sample] += sin(TAU * root * t) * exp(-15.0 * t) * 0.15
-	for each in CUES:
-		var position := roundi((4.0 + float(each[0])) * step)
+	for cue in cue_chart:
+		var position := roundi((4.0 + float(cue[0])) * beat_samples)
 		for sample in range(6200):
-			samples[position + sample] += _drum_signal(each[1] == KICK, float(sample) / RATE)
+			samples[position + sample] += _drum_signal(String(cue[1]), float(sample) / RATE) * 0.64
 	return _wav(samples, RATE)
 
 
@@ -348,11 +622,15 @@ func _center(text: String, x: float, y: float, point_size: int, color: Color = I
 
 
 func _panel(box: Rect2, fill: Color, edge: Color, radius: int, border := 1) -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = fill
-	style.border_color = edge
-	style.set_corner_radius_all(radius)
-	style.set_border_width_all(border)
+	var style_key := "%d/%d/%d/%d" % [fill.to_rgba32(), edge.to_rgba32(), radius, border]
+	var style: StyleBoxFlat = panel_styles.get(style_key)
+	if not style:
+		style = StyleBoxFlat.new()
+		style.bg_color = fill
+		style.border_color = edge
+		style.set_corner_radius_all(radius)
+		style.set_border_width_all(border)
+		panel_styles[style_key] = style
 	draw_style_box(style, box)
 
 
@@ -441,62 +719,154 @@ func _paint_crab(at: Vector2, threat: float, color: Color) -> void:
 
 
 func _draw_battle(elapsed: float) -> void:
+	if phase == Phase.DONE and won and victory_atlas:
+		var progress := clampf((now_ms - finished_ms) / VICTORY_MS, 0.0, 1.0)
+		var frame := mini(15, floori(progress * 16))
+		var cell := victory_atlas.get_size() / 4.0
+		# Fill the stage with a centered cut of each widescreen frame; retain
+		# the live HUD and leave replay available throughout the musical cadence.
+		var cropped := Vector2(cell.x, cell.x * ART.size.y / ART.size.x)
+		var top_left := Vector2(frame % 4, frame >> 2) * cell + (cell - cropped) * 0.5
+		draw_texture_rect_region(victory_atlas, ART, Rect2(top_left, cropped))
+		return
 	var cue_strength := 0.0
 	var cue_color := GOLD
 	if phase == Phase.PLAYING:
-		for cue in CUES:
-			var age := elapsed - float(cue[0]) * BEAT_MS
-			if age >= 0 and age < 410.0:
-				cue_strength = (1.0 - age / 410.0) ** 2
-				cue_color = GOLD if cue[1] == KICK else BLUE
-	var attack := (now_ms - launch_ms) / 290.0
-	var retaliation := (now_ms - recoil_ms) / 430.0
-	var recoil := 0.0 if retaliation < 0.0 or retaliation >= 1.0 else sin(retaliation * PI)
-	var clip := 0.0 if attack < 0.50 or attack >= 1.65 else (1.65 - attack) / 1.15
+		for cue in cue_chart:
+			var age := elapsed - float(cue[0]) * beat_ms
+			if age >= 0.0 and age < 245.0:
+				var pulse := (1.0 - age / 245.0) ** 2
+				if pulse > cue_strength:
+					cue_strength = pulse
+					cue_color = LANE_COLORS[cue[1]]
 	var shatter := 0.0
-	if phase == Phase.DONE and damage == ANSWERS.size():
-		shatter = clampf((now_ms - finished_ms) / 720.0, 0.0, 1.0)
-	var ship := Vector2(303.0, 456.0) if art else Vector2(242.0, 447.0)
-	var enemy := Vector2(828.0 + clip * 17.0 + shatter * 116.0, 372.0 - cue_strength * 15.0 + shatter * 40.0)
-	draw_circle(enemy, 117.0, Color(cue_color, cue_strength * 0.15), true, -1, true)
-	draw_circle(enemy, 116.0 + cue_strength * 15.0, Color(cue_color, cue_strength * 0.80), false, 4.0, true)
+	if phase == Phase.DONE and won:
+		shatter = clampf((now_ms - finished_ms) / 940.0, 0.0, 1.0)
+	var armor_impact := clampf(1.0 - (now_ms - break_ms) / 520.0, 0.0, 1.0)
+	var retaliation := (now_ms - recoil_ms) / 430.0
+	var recoil := sin(retaliation * PI) if retaliation >= 0.0 and retaliation < 1.0 else 0.0
+	var ship := Vector2(304.0, 401.0) if art else Vector2(242.0, 396.0)
+	var enemy := Vector2(854.0 + armor_impact * 19.0 + shatter * 95.0, 330.0 - cue_strength * 13.0 + shatter * 23.0)
+	if cue_strength > 0.0:
+		draw_circle(enemy, 93.0, Color(cue_color, cue_strength * 0.15), true, -1, true)
+		draw_circle(enemy, 97.0 + cue_strength * 12.0, Color(cue_color, cue_strength * 0.84), false, 4.0, true)
 	if not art:
 		_paint_ship(ship, elapsed, recoil)
-	if boss:
-		var height := 308.0 + cue_strength * 18.0 - shatter * 70.0
-		var width := height * boss.get_width() / boss.get_height()
-		var tint := Color.WHITE.lerp(Color("#f7dca2"), clip * 0.78)
-		tint.a = 1.0 - shatter * 0.62
-		draw_texture_rect(boss, Rect2(enemy.x - width / 2.0, enemy.y - height * 0.62, width, height), false, tint)
-	else:
-		_paint_crab(enemy, cue_strength, cue_color)
-	if attack > 0.0 and attack < 1.0:
-		var location := (ship + Vector2(83, -29)).lerp(enemy + Vector2(-83, 13), attack)
-		var heavy := launch_lane == KICK
-		var energy := GOLD if heavy else BLUE
-		if heavy:
-			for wave in range(3):
-				draw_arc(location - Vector2(wave * 30, 0), 18.0 + attack * 19.0, -1.2, 1.2, 16, Color(energy, 0.95 - wave * 0.19), 7.0 - wave * 1.7, true)
-		else:
-			draw_line(location - Vector2(56, -3), location + Vector2(9, 0), Color(energy, 0.72), 8.0, true)
-			draw_circle(location, 8.0, IVORY, true, -1, true)
-		if attack < 0.42:
-			draw_circle(ship + Vector2(83, -29), 18.0 + attack * 85.0, Color(energy, 1.0 - attack / 0.42), false, 5.0, true)
-	if clip > 0.0:
-		for index in range(7):
-			var angle := index * TAU / 7
-			var ray := Vector2.from_angle(angle)
-			var center := enemy + Vector2(-37.0, 19.0) + ray * (22.0 + (1.0 - clip) * 74.0)
-			draw_line(center, center + ray * 16.0 * clip, Color(GOLD if launch_lane == KICK else BLUE, clip), 4.0, true)
+	_draw_active_boss(enemy, elapsed, cue_strength, cue_color, armor_impact, shatter)
+	for effect in effects:
+		var age := now_ms - float(effect.start)
+		if age < 0.0 or age > 650.0:
+			continue
+		_draw_attack(ship, enemy, effect, age)
+	var guard := (now_ms - guard_ms) / 320.0
+	if guard >= 0.0 and guard < 1.0:
+		var shield := ship + Vector2(75, -26)
+		draw_arc(shield, 43.0 + guard * 28.0, -1.24, 1.24, 25, Color(BLUE, 1.0 - guard), 7.0, true)
+		draw_arc(shield, 53.0 + guard * 31.0, -1.1, 1.1, 24, Color(IVORY, 0.72 * (1.0 - guard)), 3.0, true)
 	if retaliation >= 0.0 and retaliation < 1.0:
-		var return_shot := (enemy + Vector2(-95.0, 22.0)).lerp(ship + Vector2(75, -13), retaliation)
-		draw_circle(return_shot, 13.0 + (1.0 - retaliation) * 11.0, Color("#fc655d"), false, 5.0, true)
-		draw_line(return_shot, return_shot + Vector2(43, -4), Color(SALMON, 0.88), 6.0, true)
+		var from := enemy + Vector2(-85.0, 22.0)
+		var target := ship + Vector2(73.0, -13.0)
+		var shot := from.lerp(target, ease(retaliation, 1.65))
+		draw_circle(shot, 14.0 + (1.0 - retaliation) * 13.0, Color("#ff6b64"), false, 5.0, true)
+		draw_line(shot, shot + Vector2(58, -5), Color(SALMON, 0.92), 7.0, true)
 		if retaliation > 0.62:
-			draw_circle(ship + Vector2(70, -13), 22.0 + retaliation * 48.0, Color(SALMON, (1.0 - retaliation) * 2.6), false, 7.0, true)
+			_sparks(target, (retaliation - 0.62) / 0.38, SALMON, 11, 92.0)
+	if phase == Phase.DONE and won and shatter < 1.0:
+		_sparks(enemy, shatter, GOLD, 18, 170.0)
+
+
+func _draw_active_boss(enemy: Vector2, elapsed: float, cue: float, cue_color: Color, impact: float, retreat: float) -> void:
+	var height := 264.0 + cue * 14.0 - retreat * 45.0
+	var width := height * 1.5
+	var tint := Color.WHITE.lerp(Color("#fff0a0"), impact * 0.82)
+	tint.a = 1.0 - retreat * 0.82
+	var atlas_progress := _slam_progress(elapsed)
+	var target := Rect2(enemy.x - width / 2.0, enemy.y - height * 0.61, width, height)
+	if burst_atlas and atlas_progress >= 0.0 and atlas_progress < 1.0:
+		var index := mini(15, floori(atlas_progress * 16.0))
+		var frame_size := burst_atlas.get_size() / 4.0
+		var source := Rect2(Vector2(index % 4, index >> 2) * frame_size, frame_size)
+		var aligned := Rect2(target.position - target.size * Vector2(0.348, 0.312), target.size * Vector2(1.674, 1.667))
+		draw_texture_rect_region(burst_atlas, aligned, source, tint)
+	elif boss:
+		draw_texture_rect(boss, target, false, tint)
+	else:
+		_paint_crab(enemy, cue, cue_color)
+
+
+func _slam_progress(elapsed: float) -> float:
+	if phase != Phase.PLAYING or elapsed < 0.0:
+		return -1.0
+	var cycle := clampi(floori(elapsed / (4.0 * bar_ms)), 0, 3)
+	var first_step := int(Orders.GUARDS[cycle][0][0])
+	var impact_beat := cycle * 16.0 + 12.0 + first_step / 4.0
+	# Frame eight is paced onto the score so the asset never becomes a clock.
+	return (elapsed - impact_beat * beat_ms + beat_ms / 2.0) / beat_ms
+
+
+func _draw_attack(ship: Vector2, enemy: Vector2, effect: Dictionary, age: float) -> void:
+	var kind: String = effect.kind
+	var lane: String = effect.lane
+	var strength: float = effect.strength
+	var flight := 175.0 if kind == "hit" else 320.0
+	var progress := age / flight
+	var energy: Color = LANE_COLORS[lane] if kind == "hit" else GOLD
+	match kind:
+		"flurry": energy = BLUE
+		"break": energy = Color("#e4a3ff")
+		"counter": energy = Color("#bcffe4")
+	var source := ship + Vector2(82.0, -24.0)
+	var target := enemy + Vector2(-80.0, 13.0)
+	if progress < 1.0:
+		var at := source.lerp(target, ease(progress, 1.42))
+		var opacity := minf(1.0, 0.62 + strength * 0.42)
+		match kind:
+			"power":
+				for wave in range(4):
+					draw_arc(at - Vector2(wave * 25.0, 0), 34.0 + progress * 41.0, -1.14, 1.14, 24, Color(energy, opacity - wave * 0.16), 9.0 - wave * 1.35, true)
+			"flurry":
+				for shot in range(6):
+					var dart := at + Vector2(-21.0 * shot, float(shot % 3 - 1) * 26.0)
+					draw_line(dart - Vector2(37, 0), dart, Color(energy, 0.94 - shot * 0.11), 6.0, true)
+					draw_circle(dart, 4.0, IVORY, true, -1, true)
+			"break":
+				for side in [-1, 1]:
+					var aim := at + Vector2(0, side * sin(progress * PI) * 64.0)
+					_diamond(aim, 21.0 + progress * 12.0, Color(energy, 0.84), 5.0)
+			"counter":
+				draw_line(at - Vector2(86, 0), at, Color(energy, 0.50), 19.0, true)
+				_diamond(at, 24.0, IVORY, 5.0)
+			_:
+				draw_line(at - Vector2(37, 0), at, Color(energy, 0.72), 5.0, true)
+				draw_circle(at, 6.0, energy, true, -1, true)
+	elif progress < 1.7:
+		var scatter := (progress - 1.0) / 0.7
+		_sparks(target, scatter, energy, 6 if kind == "hit" else 13, 72.0 if kind == "hit" else 123.0)
+		if kind != "hit":
+			draw_circle(target, 28.0 + scatter * 82.0, Color(energy, (1.0 - scatter) * 0.84), false, 6.0, true)
+
+
+func _diamond(point: Vector2, radius: float, ink: Color, width: float) -> void:
+	var outline := PackedVector2Array([
+		point - Vector2(0, radius), point + Vector2(radius * 1.35, 0), point + Vector2(0, radius),
+		point - Vector2(radius * 1.35, 0), point - Vector2(0, radius),
+	])
+	draw_polyline(outline, ink, width, true)
+
+
+func _sparks(point: Vector2, progress: float, ink: Color, count: int, radius: float) -> void:
+	var growth := 1.0 - (1.0 - progress) ** 2
+	for index in range(count):
+		var ray := Vector2.from_angle(index * TAU / count)
+		var tip := point + ray * (16.0 + growth * radius * (0.64 if index % 2 else 1.0))
+		draw_line(tip, tip + ray * (5.0 + (1.0 - progress) * 17.0), Color(ink, 1.0 - progress), 4.0, true)
 
 
 func _draw_transport() -> void:
+	var changing := phase != Phase.PLAYING and phase != Phase.STARTING
+	_panel(SPEED_BUTTON, Color("#223445"), Color("#526c82") if changing else Color("#2f3e4b"), 9)
+	var speed_label := "%d BPM  /  B" % tempo
+	_center(speed_label, SPEED_BUTTON.get_center().x, 71.0, 15, GOLD if changing else MUTED)
 	var bar_status := "连接 MIDI"
 	match midi:
 		"connected": bar_status = "MIDI 已连接"
@@ -514,89 +884,201 @@ func _draw_transport() -> void:
 	_center(display, ACTION_BUTTON.get_center().x, 71.0, 18, INK)
 
 
-func _draw_pad(box: Rect2, lane: String, key: String, description: String, ink: Color) -> void:
-	var clicked := clampf(1.0 - (now_ms - pad_hits[lane]) / 200.0, 0.0, 1.0)
-	var fill := Color("#253544").lerp(ink.darkened(0.22), clicked * 0.75)
-	_panel(box, fill, ink.darkened(0.52), 14, 2)
-	draw_line(box.position + Vector2(14.0, 20.0), box.position + Vector2(14.0, 101.0), ink, 4.0, true)
-	var icon := box.position + Vector2(60, 61)
-	draw_circle(icon, 23.0, Color(ink, 0.18), true, -1, true)
-	draw_circle(icon, 21.0, ink, false, 3.0, true)
-	draw_circle(icon + Vector2(0, -1), 10.0, ink, false, 2.0, true)
-	if lane == SNARE:
-		draw_line(icon + Vector2(-17, -16), icon + Vector2(18, -31), ink, 3.0, true)
-	_line(("军鼓" if lane == SNARE else "底鼓"), box.position + Vector2(101, 57), 33)
-	_line(description, box.position + Vector2(103, 87), 17, MUTED)
-	var key_rect := Rect2(box.end.x - 80.0, box.position.y + 36.0, 52, 52)
-	_panel(key_rect, INK, ink.darkened(0.38), 8)
-	_center(key, key_rect.get_center().x, key_rect.get_center().y + 8, 25, ink)
+func _draw_pad(lane: String) -> void:
+	var box: Rect2 = LANE_PADS[lane]
+	var ink: Color = LANE_COLORS[lane]
+	var clicked := clampf(1.0 - (now_ms - pad_hits[lane]) / 145.0, 0.0, 1.0)
+	_panel(box, Color("#253544"), ink.darkened(0.52), 13, 2)
+	if clicked > 0.0:
+		draw_rect(box.grow(-4.0), Color(ink, clicked * 0.58))
+	draw_line(box.position + Vector2(12, 13), box.position + Vector2(12, 64), ink, 4.0, true)
+	var icon := box.position + Vector2(45.0, 38.0)
+	if lane == HAT:
+		draw_arc(icon + Vector2(0, 4), 17.0, -PI, 0, 16, ink, 3.0, true)
+		draw_line(icon + Vector2(-19, 5), icon + Vector2(19, 5), ink, 3.0, true)
+		draw_line(icon + Vector2(0, 5), icon + Vector2(0, 18), ink, 3.0, true)
+	else:
+		draw_circle(icon, 18.0, ink, false, 3.0, true)
+		draw_circle(icon, 8.0, ink, false, 2.0, true)
+		if lane == SNARE:
+			draw_line(icon + Vector2(-14, -14), icon + Vector2(16, -26), ink, 3.0, true)
+	_line(LANE_NAMES[lane], box.position + Vector2(77.0, 48.0), 27)
+	var key_rect := Rect2(box.end.x - 60, box.position.y + 17, 39, 43)
+	_panel(key_rect, INK, ink.darkened(0.35), 6)
+	_center(LANE_KEYS[lane], key_rect.get_center().x, key_rect.get_center().y + 7, 21, ink)
 
 
-func _draw_status(elapsed: float) -> void:
+func _draw_status(elapsed: float, bar: int) -> void:
 	var left := STATUS.position.x + 16.0
 	var title := "迎击轰壳蟹"
-	var subtitle := "先听示威，跟拍还击。"
+	var subtitle := "用真实架子鼓律动出招。"
+	var detail := "初学可切换到 72 BPM。"
 	var tint := GOLD
-	if phase == Phase.IDLE:
-		_line("第一轮打军鼓，第二轮加底鼓。", Vector2(left, 245), 16, MUTED)
-		_line("打准破甲，失误会损伤船体。", Vector2(left, 276), 16, MUTED)
-	elif phase == Phase.STARTING:
+	if phase == Phase.STARTING:
 		title = "准备音频"
 	elif phase == Phase.PLAYING:
-		var beat := elapsed / BEAT_MS
-		if beat < 0.0:
+		var cycle := bar >> 2
+		if elapsed < 0.0:
 			title = "四拍预备"
-			subtitle = str(clampi(ceili(-beat), 1, 4))
-		elif beat >= 16.0:
-			title = "战斗结束"
-			subtitle = "已打完四小节。"
+			subtitle = str(clampi(ceili(-elapsed / beat_ms), 1, 4))
+			detail = "预备结束后，先听首领的动作。"
 		else:
-			var bar := floori(beat / 4.0)
-			var answer := bar % 2 == 1
-			title = "跟拍迎击" if answer else "听首领示威"
-			tint = GOLD if answer else BLUE
-			subtitle = "跟打上一小节的鼓点。" if answer else "听清首领这一小节的鼓点。"
-			var step := floori(beat) % 4
-			for dot in range(4):
-				draw_circle(Vector2(left + 5.0 + dot * 26.0, 239), 5.0, tint if dot == step else Color(0.62, 0.69, 0.72, 0.35), true, -1, true)
-			_line("第 %d / 4 小节" % [bar + 1], Vector2(left + 116.0, 244), 15, Color(tint, 0.83))
+			match bar % 4:
+				Orders.Bar.SCOUT:
+					title = "侦察示范"
+					subtitle = "弱点建议：%s" % Orders.ATTACK_NAMES[Orders.RECOMMENDED[cycle]]
+					detail = "听示范，下一小节可打任意一式。"
+					tint = BLUE
+				Orders.Bar.ATTACK:
+					title = "自由出招"
+					subtitle = "本轮弱点：%s" % Orders.ATTACK_NAMES[Orders.RECOMMENDED[cycle]]
+					detail = "连射修船，碎浪得盾。只打一行。"
+					tint = GOLD
+				Orders.Bar.LISTEN:
+					title = "听首领出招"
+					subtitle = Orders.GUARD_NAMES[cycle]
+					detail = Orders.GUARD_GUIDES[cycle]
+					tint = SALMON
+				Orders.Bar.GUARD:
+					title = "跟拍防守"
+					subtitle = Orders.GUARD_NAMES[cycle]
+					detail = Orders.GUARD_GUIDES[cycle]
+					tint = BLUE
+			_line("第 %d / 16 小节" % [bar + 1], Vector2(STATUS.end.x - 104.0, 148), 13, MUTED)
 	elif phase == Phase.DONE:
-		title = "击退轰壳蟹" if damage == ANSWERS.size() else ("鼓船受损" if hull == 0 else "突围未成")
-		tint = GOLD if damage == ANSWERS.size() else SALMON
-		subtitle = "破甲 %d / 6  ·  精准 %d" % [damage, perfect]
-		_line("漏击 %d  ·  多击 %d" % [missed, extras], Vector2(left, 255), 16, MUTED)
+		title = "击退轰壳蟹" if won else ("鼓船受损" if hull == 0 else "首领仍有护甲")
+		tint = GOLD if won else SALMON
+		subtitle = "破甲 %d / %d  ·  精准 %d" % [damage, Orders.BOSS_ARMOR, perfect]
+		detail = "成招 %d  ·  反击 %d  ·  漏击 %d  ·  多击 %d" % [attacks_landed, counters, missed, extras]
 	if not error_text.is_empty():
 		subtitle = error_text
-	_line(title, Vector2(left, 179), 31, tint)
-	_line(subtitle, Vector2(left, 212), 17)
-	if phase == Phase.PLAYING and now_ms - latest < 850.0 and not feedback.is_empty():
-		_line(feedback, Vector2(left, 282), 16, feedback_color)
+	_line(title, Vector2(left, 174), 28, tint)
+	_line(subtitle, Vector2(left, 205), 17)
+	if now_ms - latest < 1020.0 and phase == Phase.PLAYING and not feedback.is_empty():
+		_line(feedback, Vector2(left, 238), 16, feedback_color)
+	elif phase == Phase.DONE:
+		_line(detail, Vector2(left, 228), 13, MUTED)
+		_line(coaching, Vector2(left, 248), 14, GOLD)
+	else:
+		_line(detail, Vector2(left, 238), 14, MUTED)
 
 
 func _draw_health() -> void:
-	_panel(Rect2(68, 132, 237, 49), Color("#183349"), Color("#658798"), 11)
-	_line("船体", Vector2(87, 164), 20, IVORY)
-	for index in range(3):
-		var box := Rect2(148 + index * 40, 147, 29, 17)
-		_panel(box, BLUE if index < hull else INK, BLUE.darkened(0.3), 4)
-	_panel(Rect2(744, 132, 346, 60), Color("#322137"), Color("#815872"), 11)
-	_line("首领护甲", Vector2(763, 169), 21, IVORY)
-	for index in range(6):
-		var box := Rect2(865 + index * 35, 152, 26, 18)
-		_panel(box, SALMON if index < ANSWERS.size() - damage else INK, SALMON.darkened(0.3), 4)
+	_panel(Rect2(56, 126, 305, 60), Color("#183349"), Color("#658798"), 11)
+	_line("船体", Vector2(70, 151), 17)
+	_line("%d / %d" % [hull, Orders.SHIP_HULL], Vector2(266, 151), 16, BLUE)
+	if shield > 0:
+		_line("护盾", Vector2(136, 151), 15, GOLD)
+	for index in range(Orders.SHIP_HULL):
+		var box := Rect2(72 + index * 34, 161, 29, 10)
+		_panel(box, BLUE if index < hull else INK, BLUE.darkened(0.3), 3)
+	_panel(Rect2(758, 126, 338, 60), Color("#322137"), Color("#815872"), 11)
+	_line("首领护甲", Vector2(772, 151), 17)
+	_line("%d / %d" % [Orders.BOSS_ARMOR - damage, Orders.BOSS_ARMOR], Vector2(1017, 151), 16, SALMON)
+	for index in range(Orders.BOSS_ARMOR):
+		var x := 772.0 + index * 11.0
+		var filled := index < Orders.BOSS_ARMOR - damage
+		draw_rect(Rect2(x, 162, 9, 9), SALMON if filled else INK)
+
+
+func _draw_score(elapsed: float, bar: int) -> void:
+	const CELL := 57.0
+	const LEFT := 196.0
+	const BOTTOM := 587.0
+	var active := phase == Phase.PLAYING and elapsed >= 0.0
+	var context := bar % 4 if active else Orders.Bar.ATTACK
+	var cycle := bar >> 2
+	var active_step := clampi(floori((elapsed - bar * bar_ms) / (beat_ms * 0.25)), 0, 15) if active else -1
+	_panel(GRID, Color("#172638"), Color("#4d6177"), 11)
+	_line("鼓点指令", Vector2(55, 480), 19)
+	for step in range(16):
+		var quarter := step % 4 == 0
+		var x := LEFT + CELL * step
+		if quarter:
+			draw_line(Vector2(x - 4, 460), Vector2(x - 4, BOTTOM), Color("#3d536e"), 2.0, true)
+		if step == active_step:
+			draw_rect(Rect2(x - 2, 459, CELL - 3, BOTTOM - 458), Color(0.38, 0.68, 0.82, 0.19))
+		var label: String = str((step >> 2) + 1) if quarter else ["", "e", "&", "a"][step % 4]
+		_center(label, x + CELL * 0.5, 478.0, 16, IVORY if quarter or step == active_step else MUTED)
+	if context in [Orders.Bar.ATTACK, Orders.Bar.SCOUT]:
+		for index in range(Orders.ATTACKS.size()):
+			var state: Orders.Attempt = attack_orders[cycle][index] if active and context == Orders.Bar.ATTACK else null
+			var row_y := 504.0 + index * 31.0
+			var suggested: bool = active and index == Orders.RECOMMENDED[cycle]
+			var label: String = Orders.ATTACK_NAMES[index]
+			if suggested:
+				label += "★"
+			var cue_row := context == Orders.Bar.SCOUT and suggested
+			_draw_order_row(Orders.ATTACKS[index], label, row_y, LEFT, CELL, state, active_step, cue_row, suggested)
+	else:
+		var state := guard_orders[cycle] if context == Orders.Bar.GUARD else null
+		_draw_order_row(Orders.GUARDS[cycle], "防守谱", 519, LEFT, CELL, state, active_step, context == Orders.Bar.LISTEN, false, Orders.GUARD_HANDS[cycle])
+		var reads := "同列为合击，空格不打。"
+		if state:
+			reads = "%d / %d 命中  ·  多击 %d" % [state.hits, state.notes.size(), state.extras]
+		_line(reads, Vector2(55, 571), 16, BLUE.lightened(0.15))
+		_line("R 右手，L 左手。按鼓位和时机判定。", Vector2(LEFT + 99, 571), 16, MUTED)
+
+
+func _draw_order_row(
+	chart: Array, label: String, y: float, left: float, width: float,
+	state: Orders.Attempt, current_step: int, is_preview: bool, suggested: bool = false, hands: String = ""
+) -> void:
+	_line(label, Vector2(55, y + 5.0), 17, GOLD if suggested else IVORY)
+	draw_line(Vector2(left + 1.0, y + 15.0), Vector2(GRID.end.x - 12.0, y + 15.0), Color("#294156"), 1.0)
+	var previous := -1
+	var count := 0
+	for index in range(chart.size()):
+		var step := int(chart[index][0])
+		if step != previous:
+			previous = step
+			count = 0
+		var lane := String(chart[index][1])
+		var lit := is_preview and current_step == step
+		var hit := state.filled(index) if state else false
+		var ink: Color = LANE_COLORS[lane]
+		var x := left + width * step + width / 2.0
+		if index + 1 < chart.size() and int(chart[index + 1][0]) == step:
+			x -= 13.3
+		if count > 0:
+			x += 13.3
+		var expired := state and current_step > step + 1 and not hit
+		var dot := Vector2(x, y - 1)
+		draw_circle(dot, 12.0, ink if lit or hit else ink.darkened(0.69), true, -1.0, true)
+		if not lit and not hit:
+			draw_circle(dot, 12.0, Color(ink, 0.35 if expired else 0.88), false, 1.6, true)
+		_center(LANE_GLYPHS[lane], x, y + 5.0, 16, INK if lit or hit else IVORY)
+		if index < hands.length() and hands[index] != " ":
+			_center(hands[index], x, y + 34.0, 17, BLUE if hands[index] == "R" else GOLD)
+		count += 1
+
+
+func _guide_visible() -> bool:
+	return phase == Phase.IDLE or (phase == Phase.DONE and now_ms - finished_ms >= VICTORY_MS)
 
 
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, 1152, 720), INK)
-	_line("潮汐鼓港", Vector2(36, 67), 37)
-	_line("鼓浪迎击    /    84 BPM    /    4/4", Vector2(39, 93), 14, GOLD)
+	_line("潮汐鼓港", Vector2(36, 66), 36)
+	_line("鼓浪迎击    /    %d BPM    /    4/4" % tempo, Vector2(39, 91), 14, GOLD)
+	if not midi_readout.is_empty():
+		_line(midi_readout, Vector2(278, 70), 17, BLUE)
 	_draw_transport()
 	_draw_backdrop()
 	var elapsed := now_ms - anchor_ms if phase == Phase.PLAYING else 0.0
+	var bar := clampi(floori(elapsed / bar_ms), 0, Orders.BAR_COUNT - 1)
 	_draw_battle(elapsed)
 	_panel(STATUS, Color("#12212c").darkened(0.16) * Color(1, 1, 1, 0.94), Color("#4b5960"), 13)
-	_draw_status(elapsed)
+	_draw_status(elapsed, bar)
 	_draw_health()
-	_draw_pad(KICK_PAD, KICK, "D", "KICK  /  脚踩", BLUE)
-	_draw_pad(SNARE_PAD, SNARE, "F", "SNARE  /  手敲", SALMON)
-	_line("D / F 或点按鼓垫    ·    M 连接罗兰电子鼓", Vector2(36, 700), 16, MUTED)
+	var show_guide := _guide_visible()
+	if browser and guide_link_visible != show_guide:
+		browser.setGuideVisible(show_guide)
+		guide_link_visible = show_guide
+	if show_guide:
+		_panel(GUIDE_BUTTON, Color("#173b47"), BLUE, 9)
+		_center("查看七张练习谱", GUIDE_BUTTON.get_center().x, GUIDE_BUTTON.get_center().y + 8.0, 22, IVORY)
+	_draw_score(elapsed, bar)
+	for lane: String in Orders.LANES:
+		_draw_pad(lane)
+	_line("D / F / J / K 或点按鼓垫    ·    M 连接罗兰电子鼓", Vector2(36, 705), 15, MUTED)
