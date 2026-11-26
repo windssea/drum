@@ -1,0 +1,17 @@
+{
+  "name": "drum-lab",
+  "main": "infra/worker.js",
+  "compatibility_date": "2026-06-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [{ "pattern": "drum.nanokid.win", "custom_domain": true }],
+  "assets": {
+    "directory": "build/site",
+    "binding": "ASSETS",
+    "run_worker_first": ["/index.wasm"]
+  },
+  "r2_buckets": [{ "binding": "ENGINE", "bucket_name": "tidebeat-harbor-runtime" }],
+  "vars": {
+    "WASM_SHA256": "fc74679e3b97f76878947fcd4fbe1268cbfa6188182a2e33bbc3f5dc9bfa57d0"
+  }
+}
