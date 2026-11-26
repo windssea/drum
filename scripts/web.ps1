@@ -68,8 +68,19 @@ try {
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($sitePractice)) | Out-Null
     Copy-Item -LiteralPath $practice -Destination $sitePractice
     $bucket = $config.r2_buckets[0].bucket_name
-    & npx --yes --registry=https://registry.npmjs.org wrangler@4.168.0 r2 object put "$bucket/engine/$sha.wasm.gz" --file $gzipPath --content-type application/gzip --remote
-    if ($LASTEXITCODE -ne 0) { throw 'R2 upload failed' }
+    $enginePresent = $false
+    try {
+        # The worker reads the pinned R2 object on HEAD before returning its hash.
+        $engineUrl = "https://$($config.name).windssea526.workers.dev/index.wasm"
+        $head = Invoke-WebRequest -Method Head -Uri $engineUrl -TimeoutSec 12 -UseBasicParsing
+        $enginePresent = $head.StatusCode -eq 200 -and ($head.Headers.ETag -join '') -ceq ('W/"' + $sha + '"')
+    } catch {
+        Write-Verbose "Could not confirm the published engine. Uploading the pinned object."
+    }
+    if (!$enginePresent) {
+        & npx --yes --registry=https://registry.npmjs.org wrangler@4.168.0 r2 object put "$bucket/engine/$sha.wasm.gz" --file $gzipPath --content-type application/gzip --remote
+        if ($LASTEXITCODE -ne 0) { throw 'R2 upload failed' }
+    }
     & npx --yes --registry=https://registry.npmjs.org wrangler@4.168.0 deploy
     if ($LASTEXITCODE -ne 0) { throw 'Worker deployment failed' }
 } finally { Pop-Location }
